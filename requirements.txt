@@ -1,0 +1,116 @@
+# ========================================================================
+# Hismith Funscript Generator - Python dependencies
+# Install:  pip install -r requirements.txt
+# ========================================================================
+#
+# WINDOWS / GPU (RTX 5090 / Blackwell) - IMPORTANT
+# ------------------------------------------------------------------
+# On Windows, `pip install torch` resolves to a CPU-ONLY wheel by default.
+# To get the CUDA build, install torch/torchvision from the matching cu*
+# index FIRST, then install the rest:
+#
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#     pip install -r requirements.txt
+#
+#   (use cu126 / cu132 to match your installed CUDA + driver)
+#
+# Verify the GPU is actually usable:
+#     python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_capability(0))"
+#   -> expected:  True  (12, 0)   on RTX 5090 (sm_120 = Blackwell)
+#
+# torch >= 2.7 is the first line with Blackwell (sm_120) support, so do not
+# pin it below that for a 50-series GPU.
+#
+# CUDA_HOME (and CUDA toolkit / nvcc) is NOT required by our stack: we install
+# GroundingDINO from the pure-Python `rf-groundingdino` PyPI wheel (no
+# compile step). You would only need CUDA_HOME for the slow git+IDEA-Research
+# variant or packages that compile their own CUDA kernels at install time
+# (flash-attn, xformers, bitsandbytes, triton). If you add such a package
+# below, note it as a comment on that line.
+# ========================================================================
+
+# ── required for every run ────────────────────────────────────────
+# Use the contrib build: SOT csrt / kcf / vit / mil live in contrib modules
+opencv-contrib-python>=4.8.0
+numpy>=1.24
+scipy>=1.10
+# RDP core (Cython, simplification.cutil.simplify_coords_idx) - used by
+# core/interface/rdp_ui.py interactive_rdp.  Cython build ships with the
+# sdist; pure-Python fallback only exists in newer releases, so do NOT
+# install from "simplification[core]" (it doesn't exist).
+simplification>=1.0.0
+
+# ── YOLO pose tracker (core/detectors/yolo.py) ───────────────────
+ultralytics>=8.2
+
+# ── MediaPipe pose tracker (core/detectors/media_pipe.py) ─────────
+mediapipe>=0.9
+
+# ── GroundingDINO tracker (core/detectors/groundingdino.py) ───────
+# Frequently used - yolo26x-pose often loses the partner on close-up
+# frames, so this tracker must always be available.
+# Install torch/torchvision from the cu* index FIRST (see note above).
+torch>=2.7.0
+torchvision>=0.22.0
+# Roboflow's pure-Python build of GroundingDINO (same import name
+# `groundingdino`). Uses the official inference API
+# (`groundingdino.util.inference.Model` -> `predict_with_caption`) and the
+# configs that ship inside the package (SwinT + SwinB). No C++/CUDA compile
+# step, no CUDA_HOME, ~10 s install:
+#     pip install rf-groundingdino
+rf-groundingdino>=0.3.0
+# (supervision is pulled in as a dependency of rf-groundingdino - it
+# carries the Detections/xyxy struct that predict_with_caption returns;
+# `transformers` + `timm` too - GroundingDinoTracker includes a small
+# compatibility shim for transformers >= 5, see
+# core/detectors/groundingdino.py)
+#
+# SLOW PATH (only if you need the compiled `_C` extension or want to pin an
+# exact upstream commit): the IDEA-Research repo compiles a CUDA extension
+# in setup.py - then setup.py sees the host torch and needs CUDA_HOME + nvcc:
+#     $env:CUDA_HOME = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.2"
+#     pip install --no-build-isolation `
+#         git+https://github.com/IDEA-Research/GroundingDINO.git#egg=groundingdino
+
+# ── Ollama VLM: the --tracker ollama mode AND the advisory --vlm ───
+# The `ollama` Python client talks to a running `ollama serve` process.
+# It is only needed if you use `--tracker ollama` (LLM generation of
+# funscript) or the advisory `--vlm` flag.  The tracker registry's
+# create_tracker("ollama", ...) still works without it (the client is
+# imported lazily inside core/postpass/llm_gen._call_ollama and
+# _list_ollama_models); a clean error message is raised on the first
+# call if you forgot the `pip install`.
+#
+# Pillow ships as a dependency of `ollama` (used by
+# core/postpass/llm_gen._thumb_b64 for the image thumbnails).  Do not
+# forget that a running Ollama server (with at least one multimodal /
+# vision model pulled) is required for tracker=ollama to work.
+ollama>=0.1.0
+
+# ── OSTrack tracker (core/detectors/sot_ostrack.py, --tracker ostrack) ─
+# ONNX Runtime. ONNX weights (*.onnx) are placed into the extension models/
+# directory by the user (no official ONNX release - see
+# https://github.com/l-sf/Track-trt for the export recipe); the
+# onnxruntime package is what runs them.  onnxruntime-gpu brings the
+# CUDAExecutionProvider (RTX 30/40/50 series, cu12); the tracker falls
+# back to CPUExecutionProvider automatically when the GPU EP is missing,
+# so the plain `onnxruntime` build also works.
+onnxruntime-gpu>=1.17
+
+# ── Grounded SAM 2 tracker (core/detectors/sot_grounded_sam_2.py,
+#    --tracker gsam2) ──────────────────────────────────────────────────
+# Official repo facebookresearch/sam2 (Apache-2.0). PyPI sdist `sam2`
+# (python >= 3.10, ours is 3.14 - OK).  Reuses the already-installed
+# `torch` (cu132, RTX 50) and pulls in hydra/omegaconf/einops/timm/fvcore/
+# huggingface_hub as dependencies.  `decord` is required by `sam2.utils.misc.
+# load_video_frames` (used by `SAM2VideoPredictor.init_state` even when
+# video_path=None - the code path branches on `video_path is None` first,
+# but the import at top of misc.py pulls decord in at package-import time).
+# Install BOTH:
+#     pip install sam2 decord
+# Weights checkpoint (.pt) is auto-downloaded on first run into models/sam2/
+# (see core/detectors/models.py, SAM2_VARIANTS).
+sam2>=1.1.0
+decord>=0.6.0
+
+scikit-image
