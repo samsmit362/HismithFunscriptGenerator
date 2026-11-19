@@ -8,6 +8,7 @@
 -- Extension folder layout (%APPDATA%\OFS\OFS3_data\extensions\Hismith Funscript Generator):
 --   Hismith Funscript Generator\
 --   ├── main.lua            (this file)
+--   ├── tools.lua           (auxiliary tools: scale / move / align / stretch / insert)
 --   ├── funscript_gen.py    (Python script, lives next to this file)
 --   └── 3rdParty/
 --       └── rxi/
@@ -33,6 +34,11 @@
 -- package.path (OFS_LuaExtension.cpp), so the dotted module path resolves to
 -- <extdir>/3rdParty/rxi/json.lua.
 json = require "3rdParty.rxi.json"
+
+-- tools.lua - auxiliary tools (scale / move / align / stretch / insert).
+-- OFS adds <extdir>/?.lua to package.path, so the bare module name
+-- resolves to <extdir>/tools.lua.
+require "tools"
 
 -- ── globals ──
 procHandle = nil
@@ -421,53 +427,56 @@ function startGeneration()
 
     -- ─── existing points on the timeline ───
     -- The streaming loop stops (ALWAYS) when it reaches the first pre-existing
-    -- action at or after t0 (requirement #2) and the post-pass rescales the
-    -- boundary stroke(s) so the new track lands EXACTLY on those anchor values
-    -- (requirement #3).  Both need: (a) the full list of existing action
-    -- times (for the stop condition, compared 3-decimals-against-absolute-
-    -- video-seconds) and (b) the anchor BEGIN/END values (nearest existing
-    -- points on either side of [t0, t0] -- "before" inclusive, "after"
-    -- exclusive -- the last one before t0 is the boundary at the start and
-    -- the first one after t0 is the boundary at the end).
-    -- Dumped to a plain-text file (one "t" per line, 3 decimals) so the
-    -- Python side can read it without any JSON dependency.
-    local t0 = startTime
-    local existingFile = extDir:gsub("/", "\\") .. "\\hf_existing_points.txt"
-    -- Dump every existing action (t, pos) one per line. The Python side
-    -- reads it and uses:
-    --   * the times: to STOP the streaming at the first pre-existing
-    --     point at-or-after start_s (requirement #2);
-    --   * the pos of the LAST point BEFORE start_s (anchor_begin_pos):
-    --     to rescale the first stroke(s) so the new segment starts at the
-    --     user's existing value (requirement #3);
-    --   * the pos of the FIRST point AT-OR-AFTER start_s (anchor_end_pos):
-    --     to rescale the last stroke(s) so the new segment lands EXACTLY on
-    --     the user's existing value (requirement #3).
-    -- Both anchor positions are OPTIONAL (nil if there is no existing
-    -- point on that side of start_s) — the post-pass then leaves the
-    -- affected stroke unrescaled (legacy behaviour).
-    local fileWritten = false
+    -- action STRICTLY after start_s (requirement #2) and the post-pass rescales
+    -- the boundary stroke(s) so the new track lands EXACTLY on those anchor
+    -- values (requirement #3).  We compute all four boundary-anchor values here
+    -- and pass them EXPLICITLY as CLI parameters (no temp file):
+    --   anchorBeginMs  = ms of the LAST (max t) existing action with t <= start_s
+    --   anchorEndMs    = ms of the FIRST (min t) existing action with t >  start_s
+    --   anchorBeginPos = pos of that begin action (the value the new segment
+    --                    must LEAVE from), nil if no action at/before start_s
+    --   anchorEndPos   = pos of that end action (the value the new segment
+    --                    must LAND on), nil if no action after start_s
+    -- A keyframe AT start_s is the LEFT anchor (the START of the new segment),
+    -- NOT the right/stop boundary.  The two anchor TIMES are also what
+    -- importResult() deletes from the timeline before adding the new points.
+    local startS = math.floor(startTime * 1000.0 + 0.5) / 1000.0  -- 3-decimal, matches --start
+    local anchorBeginMs = nil
+    local anchorEndMs = nil
+    local anchorBeginPos = nil
+    local anchorEndPos = nil
     do
-        local f = io.open(existingFile, "w")
-        if f then
-            local n = 0
-            for _, a in ipairs(script.actions) do
-                local t = tonumber(a.at)
-                local p = tonumber(a.pos)
-                if t and t > 0.0005 and p then
-                    f:write(string.format("%.3f %.3f\n", t, p))
-                    n = n + 1
+        local beginT = nil
+        local endT = nil
+        for _, a in ipairs(script.actions) do
+            local t = tonumber(a.at)
+            local p = tonumber(a.pos)
+            if t and t > 0.0005 and p then
+                local t3 = math.floor(t * 1000.0 + 0.5) / 1000.0
+                local ms = math.floor(t * 1000.0 + 0.5)
+                if t3 <= startS then
+                    if beginT == nil or t3 > beginT then
+                        beginT = t3
+                        anchorBeginMs = ms
+                        anchorBeginPos = p
+                    end
+                else
+                    if endT == nil or t3 < endT then
+                        endT = t3
+                        anchorEndMs = ms
+                        anchorEndPos = p
+                    end
                 end
             end
-            f:close()
-            fileWritten = (n > 0)
         end
     end
     print(string.format(
-        "[HF] existing points file: %s (wrote=%s, t0=%.3f)",
-        existingFile,
-        fileWritten and "yes" or "no (skipping --existing-points-file)",
-        startTime))
+        "[HF] existing points: begin=%s end=%s (start=%.3f, pos begin=%s end=%s)",
+        anchorBeginMs and tostring(anchorBeginMs) or "nil",
+        anchorEndMs and tostring(anchorEndMs) or "nil",
+        startTime,
+        anchorBeginPos and string.format("%.3f", anchorBeginPos) or "nil",
+        anchorEndPos and string.format("%.3f", anchorEndPos) or "nil"))
 
     -- clear the previous result
     local of = io.open(outFile, "w")
@@ -499,13 +508,25 @@ function startGeneration()
         "--min-interval-ms", tostring(minIntervalMs),
         "--latency-ms", tostring(latencyMs),
     }
-    -- existing-points plumbing (requirements #2 and #3): pass the dump file
-    -- ONLY if at least one action was written to it (a 0-line file would
-    -- still be valid but is equivalent to the flag being absent, and we
-    -- want to keep the CLI noise minimal).
-    if fileWritten then
-        table.insert(args, "--existing-points-file")
-        table.insert(args, existingFile)
+    -- Boundary-anchor plumbing (requirements #2 and #3): pass the four
+    -- anchor values EXPLICITLY as CLI parameters (no temp file).  Each is
+    -- sent only when present (nil = no existing point on that side of
+    -- start_s -> the Python side leaves the affected stroke unrescaled).
+    if anchorBeginMs then
+        table.insert(args, "--anchor-begin-ms")
+        table.insert(args, tostring(anchorBeginMs))
+    end
+    if anchorEndMs then
+        table.insert(args, "--anchor-end-ms")
+        table.insert(args, tostring(anchorEndMs))
+    end
+    if anchorBeginPos then
+        table.insert(args, "--anchor-begin-pos")
+        table.insert(args, string.format("%.3f", anchorBeginPos))
+    end
+    if anchorEndPos then
+        table.insert(args, "--anchor-end-pos")
+        table.insert(args, string.format("%.3f", anchorEndPos))
     end
     -- --point (the POSE-tracker body zone, its list = core/config.TARGETS)
     -- is only valid for yolo / mediapipe: groundingdino has its OWN target
@@ -644,7 +665,8 @@ function startGeneration()
 
     -- remember the context for the import (BEFORE launch: the "Kill" path
     -- and update() must never touch a genCtx that does not exist yet)
-    genCtx = { scriptIdx = scriptIdx, t0 = startTime, t1 = endTime, outFile = outFile }
+    genCtx = { scriptIdx = scriptIdx, t0 = startTime, t1 = endTime, outFile = outFile,
+               anchorBeginMs = anchorBeginMs, anchorEndMs = anchorEndMs }
     lastError = ""
 
     -- Launch exactly like the working "Funscript Generator Windows" (MTFG):
@@ -758,6 +780,28 @@ function importResult()
 
     local script = ofs.Script(genCtx.scriptIdx)
 
+    -- Step 0: delete the original boundary anchor point(s) so the new
+    -- segment's keyframe(s) REPLACE them instead of colliding.  Without this,
+    -- the cross-dedupe below (Step 2/3) would drop the new point that lands on
+    -- the same ms as the still-existing anchor, leaving the user's OLD value.
+    local deletedAnchors = 0
+    if genCtx.anchorBeginMs or genCtx.anchorEndMs then
+        for idx, a in ipairs(script.actions) do
+            local ms = math.floor(a.at * 1000.0 + 0.5)
+            if (genCtx.anchorBeginMs and ms == genCtx.anchorBeginMs)
+                or (genCtx.anchorEndMs and ms == genCtx.anchorEndMs) then
+                script:markForRemoval(idx)
+                deletedAnchors = deletedAnchors + 1
+            end
+        end
+        if deletedAnchors > 0 then
+            script:removeMarked()
+            print(("[HF] deleted %d anchor point(s) before import (begin=%s, end=%s)"):format(
+                deletedAnchors,
+                tostring(genCtx.anchorBeginMs), tostring(genCtx.anchorEndMs)))
+        end
+    end
+
     -- OFS invariant: ONE action per millisecond-timestamp (Serialize keys on
     -- round(atS*1000)).  Dedup therefore uses INTEGER milliseconds as the key
     -- (NOT 1/fps, which over-merges: at 30fps a whole frame = 33ms, so the old
@@ -844,9 +888,11 @@ function init()
     print("[HF] extension loaded, dir: " .. ofs.ExtensionDir())
     status = "Idle"
     loadSettings()
+    if tools_init then tools_init() end
 end
 
 function update(delta)
+    if tools_update then tools_update(delta) end
     if procHandle then
         if procHandle:alive() then
             status = "Generating... (q/space in the preview window = stop and save)"
@@ -922,6 +968,8 @@ function gui()
     end
     ofs.Separator()
 
+    -- ── generator (tracker / model / motion / timing parameters) ──
+    if ofs.CollapsingHeader("Generator", true) then
     -- parameters
     prevTrackerIdx = trackerIdx
     trackerIdx, c = ofs.Combo("Tracker", trackerIdx,
@@ -1298,6 +1346,13 @@ function gui()
             end
         end
     end
+    end
+
+    -- ── tools (tools.lua: scale / move / align / stretch / insert) ──
+    if ofs.CollapsingHeader("Helper Tools", true) then
+        if tools_gui then tools_gui() end
+    end
+
     if anyChanged then
         saveSettings()
     end

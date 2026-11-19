@@ -29,6 +29,7 @@ from core.tracking.scene_warp import (ANGLE_STEP_DEG, PAN_CLAMP_PX, PAN_STEP_PX,
                                       SceneTransform, ZOOM_LEVELS)
 from core.tracking.seek import seek_to_time_exact
 from core.types import Person
+from core.video_reader import open_video_reader
 
 
 # ── stateful mouse drag (OpenCV has no waitMouse; tiny stateful helper) ──
@@ -320,10 +321,10 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
     will use the same value via `int(start_s*fps)` when opening the
     identify window from the preview.
     """
-    cap = cv2.VideoCapture(video_path)
-    frame, _t, seeked = seek_to_time_exact(cap, start_s, fps=fps)
+    reader = open_video_reader(video_path)
+    frame, _t, seeked = seek_to_time_exact(reader, start_s, fps=fps)
     if not seeked or frame is None:
-        cap.release()
+        reader.close()
         # RuntimeError (not sys.exit(str) = os._exit): funscript_gen.main()
         # catches it, writes the message + traceback to the stderr log and
         # exits with code 1 - the GUI / log show the reason.
@@ -403,7 +404,7 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
 
         k = cv2.waitKeyEx(30) & 0xFF
         if k in (ord('q'), ord('Q'), 27):
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             print("[identify] SOT ROI aborted by user")
             sys.exit(2)
@@ -454,7 +455,7 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
                 print(f"[identify] SOT tracker init failed: {type(e).__name__}(args={_args!r})")
                 init_err = f"{type(e).__name__}" + (f"({', '.join(repr(a) for a in _args)})" if _args else "") + " - see stderr log for the traceback"
                 continue
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             person = Person((x, y, w, h),
                             box_center(roi_frame), score=1.0)
@@ -468,7 +469,7 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
                 print(f"[identify] ps_roi attached to tracker: {ps_frame}")
             return person, None
     # unreachable (loop exits only via sys.exit / return)
-    cap.release()
+    reader.close()
     sys.exit(2)
 
 
@@ -511,10 +512,10 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
         box detected by the prompt);
       * Q = abort (exit code 2).
     """
-    cap = cv2.VideoCapture(video_path)
-    frame, _t, seeked = seek_to_time_exact(cap, start_s, fps=fps)
+    reader = open_video_reader(video_path)
+    frame, _t, seeked = seek_to_time_exact(reader, start_s, fps=fps)
     if not seeked or frame is None:
-        cap.release()
+        reader.close()
         raise RuntimeError("Failed to open the first frame.")
 
     persons: List[Person] = []
@@ -522,23 +523,24 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
 
     def _redetect():
         nonlocal persons, hint, frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES,
-                int(cap.get(cv2.CAP_PROP_POS_FRAMES)) + 1)
-        ret, fr = cap.read()
-        if not ret:
-            frame, _t2, seeked2 = seek_to_time_exact(cap, start_s, fps=fps)
-            if not seeked2:
-                cap.release()
+        nxt = reader.step(1)
+        if nxt is None:
+            # past the end of the stream - re-seek to the start frame
+            res = seek_to_time_exact(reader, start_s, fps=fps)
+            if not res[2]:
+                reader.close()
                 raise RuntimeError("End of video reached while re-detecting.")
-            fr = frame
+            fr = res[0]
+        else:
+            fr = nxt[0]
         if fr is None:
-            cap.release()
+            reader.close()
             raise RuntimeError("End of video reached while re-detecting.")
         persons = sorted(tracker.detect_all(fr), key=lambda p: -p.score)
         hint = None
         if not persons:
             if hard_error:
-                cap.release()
+                reader.close()
                 raise RuntimeError(
                     f"GroundingDINO: no detection for prompt "
                     f"'{getattr(tracker, 'prompt', '?')}' on this frame. "
@@ -551,12 +553,12 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
         # re-aim mode (R from the preview): a lost frame must not kill the
         # whole run - the caller (tracking_stream) treats (None, None) as
         # "keep the previous point, no state change".
-        cap.release()
+        reader.close()
         print("[identify] DINO ROI: no detection on this frame - "
               "keeping the previous point placement")
         return None, None
     if not persons:
-        cap.release()
+        reader.close()
         raise RuntimeError(
             f"GroundingDINO: no detection for prompt "
             f"'{getattr(tracker, 'prompt', '?')}'. Try another --dino-target, "
@@ -634,7 +636,7 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
 
         k = cv2.waitKeyEx(30) & 0xFF
         if k in (ord('q'), ord('Q'), 27):
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             if hard_error:
                 print("[identify] GroundingDINO ROI aborted by user")
@@ -660,14 +662,14 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
                   f"score={best.score:.2f} "
                   f"point p=({px:.1f}, {py:.1f}) u={sel_u:.1f}% v={sel_v:.1f}% "
                   f"prompt='{getattr(tracker, 'prompt', '?')}'")
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             active = Person(best.box, (float(px), float(py)), best.score,
                             kp=best.kp, kp_conf=best.kp_conf)
             passive = persons[1] if len(persons) > 1 else None
             return active, passive
     # unreachable (loop exits only via sys.exit / return)
-    cap.release()
+    reader.close()
     sys.exit(2)
 
 
@@ -685,14 +687,14 @@ def _identify_persons(video_path: str, start_s: float, fps: float,
         Enter        - confirm (requires ACTIVE)
         Q / Esc      - abort
     """
-    cap = cv2.VideoCapture(video_path)
-    frame, _t, seeked = seek_to_time_exact(cap, start_s, fps=fps)
+    reader = open_video_reader(video_path)
+    frame, _t, seeked = seek_to_time_exact(reader, start_s, fps=fps)
     if not seeked or frame is None:
-        cap.release()
+        reader.close()
         raise RuntimeError("Failed to open the first frame.")
     persons = tracker.detect_all(frame)
     if not persons:
-        cap.release()
+        reader.close()
         # both modes: a real error (exit code 1) -- no result to import.
         # RuntimeError (not sys.exit(str) = os._exit) so funscript_gen.main()
         # can log the reason to the stderr log before exiting.
@@ -702,7 +704,7 @@ def _identify_persons(video_path: str, start_s: float, fps: float,
 
     if auto:
         passive = persons[1] if len(persons) > 1 else None
-        cap.release()
+        reader.close()
         print(f"[identify] auto: active=person#0 score={persons[0].score:.2f}")
         if passive:
             print(f"[identify] passive=person#1 score={passive.score:.2f}")
@@ -786,20 +788,21 @@ def _identify_persons(video_path: str, start_s: float, fps: float,
         cv2.imshow(win, view)
         k = cv2.waitKeyEx(30)
         if k in (ord('q'), ord('Q')):
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             # exit code 2 => "aborted by user" - main.lua treats this
             # separately from a real error.
             print("[identify] aborted by user")
             sys.exit(2)
         if k in (ord('r'), ord('R')):
-            cap.set(cv2.CAP_PROP_POS_FRAMES,
-                    int(cap.get(cv2.CAP_PROP_POS_FRAMES)) + 1)
-            ret, frame = cap.read()
-            if not ret:
-                frame, _t, seeked = seek_to_time_exact(cap, start_s, fps=fps)
-                if not seeked:
+            nxt = reader.step(1)
+            if nxt is None:
+                res = seek_to_time_exact(reader, start_s, fps=fps)
+                if not res[2]:
                     raise RuntimeError("End of video reached while re-detecting.")
+                frame = res[0]
+            else:
+                frame = nxt[0]
             persons = sorted(tracker.detect_all(frame),
                              key=lambda p: -p.score)
             sel_idx = 0
@@ -817,13 +820,13 @@ def _identify_persons(video_path: str, start_s: float, fps: float,
         elif k in (ord('p'), ord('P')):
             passive = persons[sel_idx]
         elif (k == ord('\r')) and active is not None:                # Enter: require active
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             print(f"[identify] ACTIVE:   box={active.box} score={active.score:.2f}")
             if passive:
                 print(f"[identify] PASSIVE:  box={passive.box} score={passive.score:.2f}")
             return active, passive
     # unreachable (loop only exits via q/esc/enter)
-    cap.release()
+    reader.close()
     sys.exit(2)
 

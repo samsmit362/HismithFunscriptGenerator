@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 
 import numpy as np
 
+from core.logging import log
 from core.postpass.strokes import (StrokeInfo, segment_strokes)
 
 
@@ -92,6 +93,7 @@ def stroke_progress(stroke: StrokeInfo, stroke_pts: np.ndarray,
     pts = np.asarray(stroke_pts, dtype=np.float64)
     n = len(pts)
     if n < 2:
+        log(f"[stroke_progress] motion={motion} n={n} -> zeros (n < 2)")
         return np.zeros(n), 0.0
 
     if motion == "complex":
@@ -100,6 +102,7 @@ def stroke_progress(stroke: StrokeInfo, stroke_pts: np.ndarray,
         total = cum[-1]
         frac = cum / total if total > 1e-9 else np.zeros(n)
         amp = float(total)
+        detail = f"total={total:.6f}"
     elif motion in ("arc", "parabola"):
         fit = fit_conic(pts, stroke.axis)
         if fit is None:
@@ -107,18 +110,25 @@ def stroke_progress(stroke: StrokeInfo, stroke_pts: np.ndarray,
             span = u_rel[-1]
             frac = (u_rel / span) if abs(span) > 1e-9 else np.zeros(n)
             amp = abs(span)
+            detail = f"fit=None span={span:.6f}"
         else:
             coef, u = fit
             stroke.conic_coef = coef
             frac = conic_arc_fractions(coef, u)
             amp = _conic_total_arc(coef, u)
+            detail = (f"fit=ok coef={coef} "
+                      f"u=[{float(u.min()):.4f}..{float(u.max()):.4f}]")
     else:  # straight
         u_rel = (pts - pts[0]) @ stroke.axis
         span = u_rel[-1]
         frac = (u_rel / span) if abs(span) > 1e-9 else np.zeros(n)
         amp = abs(span)
+        detail = f"span={span:.6f}"
 
     frac = np.clip(frac, 0.0, 1.0)
+    log(f"[stroke_progress] motion={motion} n={n} {detail} "
+        f"amp={amp:.4f} "
+        f"frac=[{float(frac.min()):.6f}..{float(frac.max()):.6f}]")
     return frac, amp
 
 
@@ -196,17 +206,17 @@ def _apply_boundary_anchors(pos: np.ndarray, strokes: list,
         if anchor_begin_pos is not None and anchor_end_pos is not None:
             pos = _rescale_to_range(pos, float(anchor_begin_pos),
                                     float(anchor_end_pos))
-            print(f"[boundary] no strokes detected; pinned track to "
-                  f"[{anchor_begin_pos}..{anchor_end_pos}] "
-                  f"(sub-frame stroke, endpoints already on the timeline)")
+            log(f"[boundary] no strokes detected; pinned track to "
+                f"[{anchor_begin_pos}..{anchor_end_pos}] "
+                f"(sub-frame stroke, endpoints already on the timeline)")
         elif anchor_begin_pos is not None:
             pos = np.full_like(pos, float(anchor_begin_pos))
-            print(f"[boundary] no strokes detected; pinned track to "
-                  f"{anchor_begin_pos} (begin anchor only)")
+            log(f"[boundary] no strokes detected; pinned track to "
+                f"{anchor_begin_pos} (begin anchor only)")
         elif anchor_end_pos is not None:
             pos = np.full_like(pos, float(anchor_end_pos))
-            print(f"[boundary] no strokes detected; pinned track to "
-                  f"{anchor_end_pos} (end anchor only)")
+            log(f"[boundary] no strokes detected; pinned track to "
+                f"{anchor_end_pos} (end anchor only)")
         return np.clip(pos, 0.0, 100.0)
     n = len(strokes)
 
@@ -224,36 +234,56 @@ def _apply_boundary_anchors(pos: np.ndarray, strokes: list,
         s = strokes[idx]
         sl = slice(s.frame_start, s.frame_end + 1)
         pos[sl] = _rescale_to_range(pos[sl], t0, t1)
-        print(f"[anchors] stroke {idx} ({s.direction}): "
-              f"[{t0:.1f} => {t1:.1f}]")
+        log(f"[anchors] stroke {idx} ({s.direction}): "
+            f"[{t0:.1f} => {t1:.1f}]")
+
+    # ── Single-stroke case: BEGIN and END boundary strokes are the SAME ──
+    # When the segment has exactly one stroke (n == 1), the BEGIN boundary
+    # (stroke 0) and the END boundary (stroke n-1) are the same stroke.
+    # Applying the two anchors as two sequential rescales makes the second
+    # one override the first, so one anchor's value is lost (e.g. the first
+    # frame lands on the end anchor's implied extreme instead of
+    # anchor_begin_pos).  Combine them into ONE rescale: first frame ->
+    # anchor_begin_pos, last frame -> anchor_end_pos.
+    if n == 1 and anchor_begin_pos is not None and anchor_end_pos is not None:
+        apply(0, float(anchor_begin_pos), float(anchor_end_pos))
+        return np.clip(pos, 0.0, 100.0)
 
     # ── BEGIN anchor: boundary = stroke 0 (+ neighbor = stroke 1 for global-max) ──
     if anchor_begin_pos is not None:
         P = float(anchor_begin_pos)
         if strokes[0].direction == "advance":
-            apply(0, P, 0.0)
+            if P > 0.0:
+                apply(0, P, 0.0)
         else:
-            apply(0, P, 100.0)
+            if P < 100.0:
+                apply(0, P, 100.0)
         if normalize == "global-max" and n >= 2:
             s1 = strokes[1]
             if s1.direction == "retract":
-                apply(1, 0.0, old[1][1])       # [0 => OLD max of retract]
+                if old[1][1] > 0.0:
+                    apply(1, 0.0, old[1][1])       # [0 => OLD max of retract]
             else:
-                apply(1, 100.0, old[1][0])     # [100 => OLD min of advance]
+                if old[1][0] < 100.0:
+                    apply(1, 100.0, old[1][0])     # [100 => OLD min of advance]
 
     # ── END anchor: boundary = stroke n-1 (+ neighbor = stroke n-2 for global-max) ──
     if anchor_end_pos is not None:
         P = float(anchor_end_pos)
         if strokes[n - 1].direction == "advance":
-            apply(n - 1, 100.0, P)
+            if P < 100.0:
+                apply(n - 1, 100.0, P)
         else:
-            apply(n - 1, 0.0, P)
+            if P > 0.0:
+                apply(n - 1, 0.0, P)
         if normalize == "global-max" and n >= 2:
             s2 = strokes[n - 2]
             if s2.direction == "retract":
-                apply(n - 2, old[n - 2][0], 100.0)   # [OLD min of retract => 100]
+                if old[n - 2][0] < 100.0:
+                    apply(n - 2, old[n - 2][0], 100.0)   # [OLD min of retract => 100]
             else:
-                apply(n - 2, old[n - 2][1], 0.0)     # [OLD max of advance => 0]
+                if old[n - 2][1] > 0.0:
+                    apply(n - 2, old[n - 2][1], 0.0)     # [OLD max of advance => 0]
 
     return np.clip(pos, 0.0, 100.0)
 
@@ -316,6 +346,27 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
             f"compute_positions: times has {len(times)} entries but "
             f"raw_tracks has {n} slots (they must be aligned 1:1).")
     valid_times = [float(times[i]) for i in valid_idx]
+    # ── diagnostic logging: input slots, None (ghost) slots, zero-step runs ──
+    log(f"[pos] input: {n} slot(s), {len(valid_idx)} valid point(s), "
+        f"{n - len(valid_idx)} None (ghost/hold-over) slot(s)")
+    none_slots = [i for i, t in enumerate(raw_tracks) if t is None]
+    if none_slots:
+        log(f"[pos] None slots (forward-filled with the last valid point): "
+            f"idx={none_slots[:40]}"
+            f"{'...' if len(none_slots) > 40 else ''} "
+            f"t={[round(times[i], 3) for i in none_slots[:40]]}"
+            f"{'...' if len(none_slots) > 40 else ''}")
+    if n >= 2:
+        same = np.all(A[1:] == A[:-1], axis=1)
+        n_same = int(np.count_nonzero(same))
+        if n_same:
+            best = cur = 0
+            for v in same:
+                cur = cur + 1 if v else 0
+                if cur > best:
+                    best = cur
+            log(f"[pos] dense track: {n_same} consecutive identical point pair(s) "
+                f"(zero step); longest run = {best + 1} point(s)")
     strokes = [s for s in segment_strokes(A, valid_idx, anchor_axis,
                                           times=valid_times,
                                           cal_f=cal_f, cal_b=cal_b)
@@ -327,14 +378,25 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
         # Legacy behaviour: each stroke independently spans 0..100:
         #   advance -> pos 100..0  (towards f)
         #   retract -> pos  0..100 (towards b)
-        for s in strokes:
+        for i, s in enumerate(strokes):
             P_stroke = A[s.frame_start:s.frame_end + 1]
             frac, amp = stroke_progress(s, P_stroke, motion)
             amplitudes.append(amp)
+            log(f"[pos] stroke {i}: frames {s.frame_start}..{s.frame_end} "
+                f"n={len(P_stroke)} "
+                f"unique_pts={len(np.unique(P_stroke, axis=0))} "
+                f"first=({P_stroke[0][0]:.1f},{P_stroke[0][1]:.1f}) "
+                f"last=({P_stroke[-1][0]:.1f},{P_stroke[-1][1]:.1f}) "
+                f"amp={amp:.4f} "
+                f"frac=[{float(frac.min()):.6f}..{float(frac.max()):.6f}]"
+                f"fracs={len(frac)}")
             if s.direction == "advance":
                 frac = 1.0 - frac
             for j in range(len(P_stroke)):
                 pos[s.frame_start + j] = frac[j] * 100.0
+                log(f"[pos] stroke {i} pt {s.frame_start + j}: "
+                    f"pos: {pos[s.frame_start + j]} "
+                    f"frac: {frac[j]}")
     else:
         # global-max - user's algorithm: build the physical displacement
         # graph G (advance = negative, retract = positive), then normalize
@@ -349,17 +411,27 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
         #   normalized: -120 -> 0, -90 -> (90/130)*100 = 69.2,
         #               -40 -> (40/130)*100 = 30.8,  +10 -> 100
         running = 0.0
-        for s in strokes:
+        for i, s in enumerate(strokes):
             P_stroke = A[s.frame_start:s.frame_end + 1]
             frac, amp = stroke_progress(s, P_stroke, motion)
             amplitudes.append(amp)
             sign = 1.0 if s.direction == "retract" else -1.0
+            log(f"[pos] global-max stroke {i}: frames {s.frame_start}..{s.frame_end} "
+                f"n={len(P_stroke)} "
+                f"first=({P_stroke[0][0]:.1f},{P_stroke[0][1]:.1f}) "
+                f"last=({P_stroke[-1][0]:.1f},{P_stroke[-1][1]:.1f}) "
+                f"unique_pts={len(np.unique(P_stroke, axis=0))} "
+                f"amp={amp:.4f} sign={sign:+.1f} "
+                f"frac=[{float(frac.min()):.6f}..{float(frac.max()):.6f}] "
+                f"running={running:.4f}")
             for j in range(len(P_stroke)):
                 pos[s.frame_start + j] = running + sign * float(frac[j]) * amp
             running = running + sign * amp
         gmin = float(pos.min())
         gmax = float(pos.max())
         span_n = gmax - gmin
+        log(f"[pos] global-max: gmin={gmin:.2f} gmax={gmax:.2f} "
+            f"span={span_n:.2f}")
         if span_n > 1e-6:
             pos = 100.0 * (pos - gmin) / span_n
         else:
@@ -372,9 +444,14 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
         first_start = strokes[0].frame_start
         last_end = strokes[-1].frame_end
         last_val = 0.0
+        log(f"[pos] fill frames outside strokes: "
+            f"first_start: {first_start} "
+            f"last_end: {last_end}")
         for i in range(n):
             if i < first_start or i > last_end:
                 pos[i] = last_val
+                log(f"[pos] fill frames outside strokes: "
+                    f"pos {i}: {last_val}")
             else:
                 last_val = pos[i]
 
@@ -393,9 +470,14 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
             first_start = strokes[0].frame_start
             last_end = strokes[-1].frame_end
             last_val = pos[0]
+            log(f"[pos] boundary anchors: "
+                f"first_start: {first_start} "
+                f"last_end: {last_end}")
             for i in range(n):
                 if i < first_start or i > last_end:
                     pos[i] = last_val
+                    log(f"[pos] boundary anchors: "
+                        f"pos {i}: {last_val}")
                 else:
                     last_val = pos[i]
     else:
@@ -408,13 +490,23 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
         # interactive RDP window (user-tuned epsilon).
         pos = np.clip(pos, 0.0, 100.0)
 
+    # per-stroke detail: which frames each stroke covers and what pos range
+    # it spans AFTER normalization (diagnostic for flat / zero-pos runs)
+    for i, s in enumerate(strokes):
+        sl = pos[s.frame_start:s.frame_end + 1]
+        log(f"[pos] stroke info {i}: frames {s.frame_start}..{s.frame_end} "
+            f"(t {float(times[s.frame_start]):.3f}s.."
+            f"{float(times[s.frame_end]):.3f}s) "
+            f"dir={s.direction} amp={amplitudes[i]:.2f}px "
+            f"pos=[{float(sl.min()):.3f}..{float(sl.max()):.3f}]")
+
     # human-readable summary (both modes)
     if amplitudes:
         amp_s = " ".join(f"{a:g}" for a in amplitudes)
         dir_s = " ".join(s.direction[0].upper() for s in strokes)
         rng = f"range=[{float(pos.min()):.1f}..{float(pos.max()):.1f}]"
-        print(f"[pos] normalize={normalize} motion={motion} "
-              f"strokes={len(strokes)} dirs=[{dir_s}] amps=[{amp_s}] {rng}")
+        log(f"[pos] normalize={normalize} motion={motion} "
+            f"strokes={len(strokes)} dirs=[{dir_s}] amps=[{amp_s}] {rng}")
 
     # ── final (t, pos) list ──────────────────────────────────────────────
     # Use the REAL presentation times (POS_MSEC based, from
@@ -424,13 +516,53 @@ def compute_positions(raw_tracks: List[Optional[Tuple[float, float]]],
     # with raw_tracks) - there is no legacy i/fps fallback.
     kept = 0
     points = []
+    kept_idx: List[int] = []
     for i in range(n):
         if raw_tracks[i] is None:
+            log(f"[pos] point {i} dropped: time: {round(float(times[i]), 4)}")
             continue  # ghost / hold-over slot -> excluded from the result
         points.append((round(float(times[i]), 4), float(pos[i])))
+        log(f"[pos] point {i}: {points[-1]}")
+        kept_idx.append(i)
         kept += 1
     skipped = n - kept
     if skipped:
-        print(f"[pos] dropped {skipped} ghost/hold-over slot(s) "
-              f"from the result (kept {kept})")
+        log(f"[pos] dropped {skipped} ghost/hold-over slot(s) "
+            f"from the result (kept {kept})")
+
+    # ── flat-run detector: which (t, pos) runs land on (nearly) the same pos ──
+    # Answers "why is this time range 0.0000 in the raw CSV": a run of >=5
+    # consecutive kept points whose pos values stay within 0.05 of each other
+    # is logged with its time range, the RAW tracked points inside it
+    # (identical raw points => a forward-filled / stationary stretch) and the
+    # stroke(s) that span it.
+    if len(points) >= 2:
+        pos_arr = np.asarray([p for _, p in points], dtype=np.float64)
+        t_arr = np.asarray([t for t, _ in points], dtype=np.float64)
+        runs: List[Tuple[int, int]] = []
+        i = 0
+        while i < len(points):
+            j = i
+            while (j + 1 < len(points)
+                   and abs(float(pos_arr[j + 1]) - float(pos_arr[i])) <= 0.05):
+                j += 1
+            if j - i + 1 >= 5:
+                runs.append((i, j))
+            i = j + 1
+        if runs:
+            for i, j in runs[:25]:
+                d0, d1 = kept_idx[i], kept_idx[j]
+                span_strokes = [
+                    k for k, s in enumerate(strokes)
+                    if s.frame_start <= d1 and s.frame_end >= d0
+                ]
+                log(f"[pos] FLAT RUN: {j - i + 1} point(s) "
+                    f"pos~{pos_arr[i]:.4f} "
+                    f"t {t_arr[i]:.3f}s..{t_arr[j]:.3f}s "
+                    f"dense idx {d0}..{d1} strokes={span_strokes} "
+                    f"pos first={points[i][1]:.4f} "
+                    f"pos last={points[j][1]:.4f} "
+                    f"raw_pt first={raw_tracks[d0]} last={raw_tracks[d1]}")
+        else:
+            log("[pos] no flat run (>=5 consecutive points within 0.05) found")
     return points, strokes

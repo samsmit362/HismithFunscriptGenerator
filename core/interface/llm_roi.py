@@ -32,6 +32,7 @@ import numpy as np
 from core.interface.identify import _drag_for, _drag_reset
 from core.interface.preview import PREVIEW_H, PREVIEW_W, fit, setup_window
 from core.tracking.seek import seek_to_time_exact
+from core.video_reader import open_video_reader
 
 
 def select_llm_roi(video_path: str,
@@ -47,26 +48,23 @@ def select_llm_roi(video_path: str,
         (usually the same value the rest of the pipeline uses);
       * abort the whole run (``sys.exit(2)``) when None is returned.
     """
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        cap.release()
-        raise RuntimeError(f"[llm-roi] cannot open video: {video_path!r}")
-    # RELIABLE seek (POS_MSEC-based, see core/tracking/seek.py).  The
+    reader = open_video_reader(video_path)
+    # RELIABLE seek (frame.pts-based, see core/tracking/seek.py).  The
     # user-facing window frame is the exact starting frame of the
     # sampled span, so the crop is drawn where the LLM will see it.
     try:
-        frame, _t0, ok = seek_to_time_exact(cap, start_s, fps=fps)
+        frame, _t0, ok = seek_to_time_exact(reader, start_s, fps=fps)
     except Exception:
         frame, ok = None, False
     if (frame is None) or (not ok):
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_s * fps))
-        ret, frame = cap.read()
-        if (not ret) or (frame is None):
-            cap.release()
+        res = reader.seek_ms(start_s * 1000.0)
+        frame = res[0] if res is not None else None
+        if frame is None:
+            reader.close()
             raise RuntimeError(
                 "[llm-roi] could not read the frame at "
                 f"start_s={start_s!r}")
-    cap.release()
+    reader.close()
     fh, fw = frame.shape[:2]
 
     # Letterboxed preview + hint.

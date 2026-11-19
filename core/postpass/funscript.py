@@ -26,9 +26,10 @@ def build_funscript(points: List[Tuple[float, float]], fps: float,
         raise RuntimeError(f"[funscript] need >=1 point, got {len(pts)}")
     if len(pts) == 1:
         # A single action is a valid minimum for OFS: the boundary
-        # anchor(s) are already on the timeline (see main.lua's
-        # hf_existing_points.txt + _apply_boundary_anchors), so the new
-        # segment is "the next keyframe at the known anchor value".
+        # anchor(s) are already on the timeline (main.lua passes them via
+        # the --anchor-begin-pos / --anchor-end-pos CLI params, and
+        # _apply_boundary_anchors rescales the track onto them), so the
+        # new segment is "the next keyframe at the known anchor value".
         log("[build_funscript] NOTE: single-point result (1 action) - "
             f"t={pts[0][0]:.3f}s pos={pts[0][1]:.1f}; the stroke segment "
             f"was shorter than one tracked frame (or stopped immediately "

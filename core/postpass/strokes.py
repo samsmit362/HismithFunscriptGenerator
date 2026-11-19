@@ -473,22 +473,54 @@ def segment_strokes(A: np.ndarray,
 
     result: List[StrokeInfo] = []
     prev_axis: Optional[np.ndarray] = global_axis
-    for a, b_ in merged_ranges:
+    for i, (a, b_) in enumerate(merged_ranges):
         frame_start = int(valid_idx[a])
         frame_end = int(valid_idx[b_])
         P_stroke = A[frame_start:frame_end + 1]
         local_axis = stroke_axis(prev_axis, P_stroke)
         u_rel = (P_stroke - P_stroke[0]) @ local_axis
         u_span = float(u_rel[-1] - u_rel[0])
+        total_len = arc_length(P_stroke)
         result.append(StrokeInfo(
             frame_start=frame_start,
             frame_end=frame_end,
             direction=dir_at.get(a, "advance"),
             axis=local_axis,
-            total_len=arc_length(P_stroke),
+            total_len=total_len,
             u_span=u_span,
             max_pos_raw=0.0,
             u_rel=u_rel,
         ))
         prev_axis = local_axis
+        # ── diagnostic logging: point count, per-point step (1:1 with the
+        # [stream] step log), stroke time span, total_len ──
+        # step[j] = distance from the previous point in the dense slice
+        # (ghost slots are forward-filled -> step 0), so the sum of the
+        # per-point steps equals total_len (arc_length of the same slice):
+        # the stroke total displacement IS the sum of all its steps.
+        n_dense = len(P_stroke)
+        n_valid = b_ - a + 1
+        steps = np.zeros(n_dense, dtype=np.float64)
+        if n_dense > 1:
+            steps[1:] = np.linalg.norm(np.diff(P_stroke, axis=0), axis=1)
+        slot_time = {int(valid_idx[k]): float(valid_times[k])
+                     for k in range(a, b_ + 1)}
+        t_start = slot_time.get(frame_start)
+        t_end = slot_time.get(frame_end)
+        log(f"[strokes] stroke {i}: {n_dense} point(s) ({n_valid} valid), "
+            f"t={t_start:.3f}s..{t_end:.3f}s total_len={total_len:.2f}px "
+            f"(sum of steps = {float(np.sum(steps)):.2f}px)")
+        for j in range(n_dense):
+            t_j = slot_time.get(frame_start + j)
+            t_txt = f"{t_j:.3f}s" if t_j is not None else "-"
+            log(f"[strokes]   stroke {i} pt {j}: t={t_txt} "
+                f"p=({P_stroke[j][0]:.1f},{P_stroke[j][1]:.1f}) step={steps[j]:.2f}")
+    # ── diagnostic logging: how many valid points vs None slots, and each
+    # resulting stroke's frame span / direction / length / u_span ──
+    log(f"[strokes] segment_strokes: {len(valid_idx)} valid point(s) "
+        f"-> {len(result)} stroke(s)")
+    for i, s in enumerate(result):
+        log(f"[strokes] stroke {i}: frames {s.frame_start}..{s.frame_end} "
+            f"dir={s.direction} total_len={s.total_len:.2f}px "
+            f"u_span={s.u_span:.2f} axis=({s.axis[0]:.3f},{s.axis[1]:.3f})")
     return result

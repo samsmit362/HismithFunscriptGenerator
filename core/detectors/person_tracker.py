@@ -44,6 +44,14 @@ class PersonTracker:
     #: dino trackers leave it as None (they have no per-frame ROI box to show).
     last_raw_box: Optional[Tuple[float, float, float, float]] = None
 
+    #: REAL presentation time (ms, CAP_PROP_POS_MSEC) of the frame currently
+    #: being processed, set by the streaming loop (core/tracking/streaming.py)
+    #: right before every detect_all() call; None when the tracker is invoked
+    #: outside the streaming loop (identify / calibrate windows).  Per-frame
+    #: trackers (e.g. core/detectors/sot_opencv.py) log this in the
+    #: ofs_result_raw.csv "s.ms" format (seconds, 3 decimals).
+    frame_time_ms: Optional[float] = None
+
     #: Optional scene transform applied to EVERY frame before passing it to
     #: detect_all()/init() (set by the _setup_scene window in
     #: core/interface/identify.py for SOT trackers; None / identity for

@@ -16,25 +16,23 @@ def vlm_ollama(video_path: str, start_s: float, fps: float,
     except ImportError:
         print("[vlm] `pip install ollama` - not installed, skipping.")
         return []
-    cap = cv2.VideoCapture(video_path)
     # Use the reliable start seek (see core.tracking.seek): the POS_FRAMES
     # idiom is unreliable on some containers.  We do NOT consume the first
     # frame here (the linspace loop below re-seeks anyway); just advance the
-    # cap to its starting point.
-    from core.tracking.seek import seek_to_time_exact
-    frame0, _t0, _seek_ok = seek_to_time_exact(cap, start_s, fps=fps)
-    if not _seek_ok:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_s * fps))
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    # reader to its starting point.
+    from core.video_reader import open_video_reader
+    reader = open_video_reader(video_path)
+    total = reader.frame_count
     indices = np.linspace(0, max(total - int(start_s * fps), 1), n_samples, dtype=int)
     images_b64 = []
     for i in indices:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_s * fps) + int(i))
-        ret, frame = cap.read()
-        if ret:
+        # seek to the REAL time of the (start + i-th) frame - never fps-based
+        res = reader.seek_ms((start_s + int(i) / max(1e-6, fps)) * 1000.0)
+        if res is not None:
+            frame = res[0]
             _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
             images_b64.append(base64.b64encode(buf.tobytes()).decode("utf-8"))
-    cap.release()
+    reader.close()
     prompt = (
         f"Here are {len(images_b64)} frames from a video, in chronological order. "
         f"For EACH frame, state the position of the ACTIVE partner's {zone} "

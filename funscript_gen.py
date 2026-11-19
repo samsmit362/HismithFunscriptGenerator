@@ -138,6 +138,10 @@ try:
     from simplification.cutil import simplify_coords_idx  # noqa: F401
 except ImportError:
     _missing.append("simplification")
+try:
+    import av  # noqa: F401  (PyAV - precise frame.pts-based video reader)
+except ImportError:
+    _missing.append("av (pip: av)")
 
 if _missing:
     _py = sys.executable
@@ -145,7 +149,7 @@ if _missing:
         "ERROR: Required Python module(s) not installed: "
         + ", ".join(_missing) + ".\n"
         "Minimum set for the default sot-csrt tracker:\n"
-        f"    {_py} -m pip install opencv-contrib-python numpy simplification\n"
+        f"    {_py} -m pip install opencv-contrib-python numpy simplification av\n"
         "Full set (all trackers):\n"
         f"    {_py} -m pip install -r requirements.txt"
     )
@@ -199,7 +203,7 @@ def _run(args) -> None:
     from core.postpass.vlm import vlm_ollama
     from core.tracking.flow_refiner import FlowRefiner
     from core.tracking.streaming import tracking_stream
-    from core.utilities import format_time, parse_time, read_existing_points
+    from core.utilities import format_time, parse_time
     import numpy as np
 
     log("=" * 60)
@@ -325,8 +329,9 @@ def _run(args) -> None:
         # generate_track) so the window can show chunk/frame progress from
         # the start.  clip_s = chunk duration; every frame inside a chunk is
         # sent (e.g. 0.5s x 30fps = 15), one LLM call per chunk.
-        _cap = _cv2.VideoCapture(args.video)
-        _total = int(_cap.get(_cv2.CAP_PROP_FRAME_COUNT) or 0) if _cap.isOpened() else 0
+        from core.video_reader import open_video_reader as _ovr_llm
+        _reader = _ovr_llm(args.video)
+        _total = _reader.frame_count
         if _total > 0:
             _end_s = _total / max(1e-6, fps)
             _hi = min(_end_s, _stop_s) if _stop_s is not None else _end_s
@@ -341,19 +346,17 @@ def _run(args) -> None:
             _hi = start_s
         _cap_pos = start_s
         _disp_frame = None
-        if _cap.isOpened():
-            try:
-                _fr, _t, _ok = _stse_llm(_cap, start_s, fps=fps)
-                if _ok and _fr is not None:
-                    _disp_frame = _fr
-                else:
-                    _cap.set(_cv2.CAP_PROP_POS_FRAMES, int(start_s * fps))
-                    _ret, _fr = _cap.read()
-                    if _ret:
-                        _disp_frame = _fr
-            except Exception:
-                pass
-        _cap.release()
+        try:
+            _fr, _t, _ok = _stse_llm(_reader, start_s, fps=fps)
+            if _ok and _fr is not None:
+                _disp_frame = _fr
+            else:
+                _res = _reader.seek_ms(start_s * 1000.0)
+                if _res is not None:
+                    _disp_frame = _res[0]
+        except Exception:
+            pass
+        _reader.close()
         if _disp_frame is None:
             raise RuntimeError("[llm] could not read the display frame "
                                f"at start_s={start_s!r}")
@@ -501,10 +504,11 @@ def _run(args) -> None:
             ps_tracker.scene = getattr(tracker, "scene", None)
         # Seed on the SAME (scene-warp-applied) first frame as the primary
         # tracker so both trackers share one coordinate space.
-        _cap_ps = cv2.VideoCapture(args.video)
         from core.tracking.seek import seek_to_time_exact as _stse_ps
-        _fr_ps, _t_ps, _s_ok = _stse_ps(_cap_ps, start_s, fps=fps)
-        _cap_ps.release()
+        from core.video_reader import open_video_reader as _ovr_ps
+        _reader_ps = _ovr_ps(args.video)
+        _fr_ps, _t_ps, _s_ok = _stse_ps(_reader_ps, start_s, fps=fps)
+        _reader_ps.close()
         if not _s_ok or _fr_ps is None:
             raise RuntimeError(
                 "Failed to re-open the first frame to initialize the "
@@ -541,76 +545,48 @@ def _run(args) -> None:
         log(f"[main] flow refinement = {args.flow} "
             f"(win auto/forced={args.flow_win or 'auto'}, "
             f"jump auto/forced={args.flow_jump or 'auto'})")
-    # ── 7.5 existing-points plumbing (requirement #2 + #3) ─────────────
-    # main.lua wrote <ext_dir>/hf_existing_points.txt with one line per
-    # pre-existing action: "<time_seconds> <pos>".  From it we derive:
-    #   * stop_at    : the FIRST existing time at-or-after start_s (the
-    #                  streaming loop will break exactly there);
-    #   * anchor_begin_pos / anchor_end_pos: the anchor pos values used by
-    #                  compute_positions() to rescale the boundary stroke(s)
-    #                  so the new segment lands exactly on the old ones.
-    existing_files = []
-    if hasattr(args, "existing_points_file") and args.existing_points_file:
-        existing_files = [args.existing_points_file]
+    # ── 7.5 boundary-anchor plumbing (requirement #2 + #3) ─────────────
+    # main.lua computes the four boundary-anchor values from the OFS
+    # timeline and passes them EXPLICITLY as CLI parameters (no temp file):
+    #   * stop_at            : anchor_end_ms / 1000 -- the FIRST existing
+    #                         keyframe STRICTLY after start_s; the streaming
+    #                         loop breaks exactly there (None = stream to
+    #                         the END OF THE VIDEO);
+    #   * anchor_begin_pos   : pos of the LAST keyframe at-or-BEFORE start_s
+    #                         (the value the new segment must LEAVE from);
+    #   * anchor_end_pos     : pos of the FIRST keyframe STRICTLY after
+    #                         start_s (the value the new segment must LAND
+    #                         on).  compute_positions() rescales the boundary
+    #                         stroke(s) so the new segment lands exactly on
+    #                         the old ones.
+    #
+    # Semantics of "playhead on a keyframe": a keyframe AT start_s is the
+    # LEFT anchor (the START of the new segment), NOT the right/stop
+    # boundary -- the new segment goes FORWARD from it (to the next
+    # keyframe, or to end-of-video if none).  This is the "1 got 1 point"
+    # scenario: the old rule `stop_at = first t >= start_s` made T0 itself
+    # the stop, collapsing the stream to a single frame.
+    # NOTE: the *_ms args are TIMES (ms of the boundary keyframe); the
+    # *_pos args are POS values (0..100) of those same keyframes.  They
+    # are four DISTINCT CLI parameters -- do not mix them up.
     stop_at: Optional[float] = None
     anchor_begin_pos: Optional[float] = None
     anchor_end_pos: Optional[float] = None
-    for path in existing_files:
-        if stop_at is not None:
-            # first file already provided the boundary -- skip
-            continue
-        ext, ab, ae = read_existing_points(path, start_s)
-        if not ext:
-            continue
-        # Boundary selection (the "hole" we are generating inside):
-        #   * anchor_begin = the LAST keyframe at-or-BEFORE start_s
-        #     (or the one AT start_s: in that case it is the LEFT endpoint
-        #     of the new segment -- the stroke START).  This value is the
-        #     known physical starting position; the stream begins here.
-        #   * anchor_end   = the FIRST keyframe STRICTLY after start_s.
-        #                    If there is NO such keyframe, the new segment
-        #                    extends to END OF VIDEO (anchor_end stays None
-        #                    AND stop_at stays None).
-        #
-        # Semantics of "playhead on a keyframe":
-        #   - "playhead at the START of the hole" (leftmost keyframe in
-        #     the existing dump) -> the new segment goes FORWARD (to the
-        #     next keyframe, or to end-of-video if none);
-        #   - "playhead INSIDE the hole" (a < start < b; both a and b exist)
-        #     -> the new segment ends at b (b is the RIGHT boundary);
-        #   - "playhead at the END of the hole" (rightmost keyframe in the
-        #     dump) -> same as end-of-hole case: stream to END OF VIDEO.
-        #
-        # (This is the "1 got 1 point" scenario: the old rule
-        # `stop_at = first t >= start_s` made T0 itself the stop, so the
-        # stream collapsed to a single frame at start -- even though there
-        # were more than 2 frames to the actual end of the stroke.)
-        if stop_at is None:
-            left_t = max([t for t in ext if t <= start_s], default=None)
-            right_t = next((t for t in ext if t > start_s), None)
-            if right_t is not None:
-                stop_at = right_t
-                log(f"[main] boundary anchors: LEFT  (start) = {left_t:.3f}s "
-                    f"({format_time(left_t)}), pos={ab if ab is not None else 'N/A'}")
-                log(f"[main] boundary anchors: RIGHT / stop = {right_t:.3f}s "
-                    f"({format_time(right_t)}), pos={ae if ae is not None else 'N/A'}")
-            else:
-                # no keyframe after start_s: the new segment extends
-                # FORWARD to end of video.
-                stop_at = None
-                log(f"[main] boundary anchors: LEFT  (start) = {left_t:.3f}s "
-                    f"({format_time(left_t)}), pos={ab if ab is not None else 'N/A'}")
-                log(f"[main] boundary anchors: RIGHT / stop = None "
-                    f"(no existing keyframe after start_s) - "
-                    f"the new segment extends to the END OF THE VIDEO.")
-        if ab is not None:
-            anchor_begin_pos = ab
-        if ae is not None:
-            anchor_end_pos = ae
-        print(f"[main] existing points from {path!r}: n={len(ext)} "
-              f"anchor_begin={anchor_begin_pos} anchor_end={anchor_end_pos}")
-        if stop_at is not None:
-            print(f"[main] stop_at: {stop_at:.3f}s = {format_time(stop_at)}")
+    if getattr(args, "anchor_begin_pos", None) is not None:
+        anchor_begin_pos = float(args.anchor_begin_pos)
+    if getattr(args, "anchor_end_pos", None) is not None:
+        anchor_end_pos = float(args.anchor_end_pos)
+    if getattr(args, "anchor_end_ms", None) is not None:
+        stop_at = args.anchor_end_ms / 1000.0
+    log("[main] boundary anchors (from CLI): "
+        f"begin={anchor_begin_pos if anchor_begin_pos is not None else 'N/A'} "
+        f"end={anchor_end_pos if anchor_end_pos is not None else 'N/A'}")
+    if stop_at is not None:
+        log(f"[main] stop_at: {stop_at:.3f}s = {format_time(stop_at)} "
+            f"(the new segment ends at the first pre-existing keyframe)")
+    else:
+        log("[main] stop_at: None (no pre-existing keyframe after start_s) - "
+            "the new segment extends to the END OF THE VIDEO.")
     # Log ALL parsed CLI options (not just the ones already above) so the
     # stderr log is self-contained when debugging a crash: this is the
     # EXACT argv the process was launched with, independent of any
@@ -672,11 +648,33 @@ def _run(args) -> None:
         print(f"          #{i}: frames {s.frame_start}-{s.frame_end} dir={s.direction} "
               f"path={s.total_len:.0f}px axis=({s.axis[0]:.3f},{s.axis[1]:.3f})")
 
-    # 6b. Raw CSV (for a repeat RDP run without re-tracking)
+    # 6b. Raw CSV (for a repeat RDP run without re-tracking).
+    #    Columns: time_s, pos, step.  `step` is the per-frame ps-COMPENSATED
+    #    displacement (px) from the previous accepted point to the current one
+    #    (independent of stroke direction / boundaries) - persisted so the
+    #    curve can be re-derived if a stroke start / end was mis-detected.
+    #    `points` holds one (time_s, pos) per kept (non-ghost) slot; the step
+    #    is 1:1 with the raw_tracks slots, so re-align it to the kept points.
+    #    A None step (first accepted point, no previous) is written as 0.0000
+    #    so every row has a parseable numeric step column.
     raw_csv = Path(args.output).with_name(Path(args.output).stem + "_raw.csv")
-    np.savetxt(raw_csv, np.asarray(points, dtype=np.float64),
-               delimiter=",", header="time_s,pos", comments="", fmt="%.4f")
-    log(f"[raw] -> {raw_csv}")
+    step_by_slot = getattr(raw_tracks, "step", None)
+    rows = []  # List[Tuple[float, float, Optional[float]]]
+    pi = 0
+    for i in range(len(raw_tracks)):
+        if raw_tracks[i] is None:
+            continue  # ghost / hold-over slot - dropped from the result
+        t_s, pos_v = points[pi]
+        step_v = step_by_slot[i] if step_by_slot is not None else None
+        rows.append((t_s, pos_v, step_v))
+        pi += 1
+    with open(raw_csv, "w", encoding="utf-8", newline="\n") as _f:
+        _f.write("time_s,pos,step\n")
+        for (t_s, pos_v, step_v) in rows:
+            # None (first accepted point, no previous) -> 0.0000 for easy parsing
+            step_txt = f"{(step_v or 0.0):.4f}"
+            _f.write(f"{t_s:.4f},{pos_v:.4f},{step_txt}\n")
+    log(f"[raw] -> {raw_csv} ({len(rows)} row(s), step column included)")
 
     # 8. RDP + range selection (interactive, single window with 3 sliders)
     if args.no_rdp:
@@ -1000,14 +998,25 @@ Examples:
     ap.add_argument("--latency-ms", type=int, default=0)
     ap.add_argument("--no-rdp", action="store_true",
                     help="Skip the RDP window (save all per-frame points)")
-    ap.add_argument("--existing-points-file", dest="existing_points_file",
+    ap.add_argument("--anchor-begin-ms", dest="anchor_begin_ms", type=int,
                     default=None,
-                    help="Path to a text file with one 'time pos' line per "
-                         "pre-existing OFS action (written by main.lua). "
-                         "The streaming loop STOPS at the first time at/after "
-                         "start_s, and the boundary stroke(s) are rescaled so "
-                         "the new segment lands exactly on the anchor values "
-                         "(see main.lua 'hf_existing_points.txt').")
+                    help="Integer ms of the LAST pre-existing OFS action with "
+                         "t <= start_s (the LEFT boundary of the new segment). "
+                         "main.lua computes it from the timeline.")
+    ap.add_argument("--anchor-end-ms", dest="anchor_end_ms", type=int,
+                    default=None,
+                    help="Integer ms of the FIRST pre-existing OFS action with "
+                         "t > start_s (the RIGHT boundary / stop point). The "
+                         "streaming loop stops at this time; None = stream to "
+                         "the end of the video.")
+    ap.add_argument("--anchor-begin-pos", dest="anchor_begin_pos", type=float,
+                    default=None,
+                    help="pos value of the begin anchor: the value the new "
+                         "segment must LEAVE from (rescales the first stroke).")
+    ap.add_argument("--anchor-end-pos", dest="anchor_end_pos", type=float,
+                    default=None,
+                    help="pos value of the end anchor: the value the new "
+                         "segment must LAND on (rescales the last stroke).")
     args = ap.parse_args()
 
     try:

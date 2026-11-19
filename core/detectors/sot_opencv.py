@@ -229,7 +229,10 @@ class SotOpenCVTracker(PersonTracker):
         # "window closed externally" and silently returned ("Esc / short
         # track").  The diagnostic is kept, but collapsed to one line and in
         # English to satisfy the "no Cyrillic in core/" project rule.)
-        log(f"[sot-{self.algo}] raw=({rx:.1f},{ry:.1f},{rw:.1f},{rh:.1f}) "
+        t_ms = self.frame_time_ms
+        t_str = f"t={t_ms / 1000.0:.3f}s" if t_ms is not None else "t=-"
+        log(f"[sot-{self.algo}] {t_str} "
+            f"raw=({rx:.1f},{ry:.1f},{rw:.1f},{rh:.1f}) "
             f"center=({cx:.2f},{cy:.2f}) "
             f"w_s={self._w_s:.1f} h_s={self._h_s:.1f} "
             f"init_w={self.init_w:.0f} init_h={self.init_h:.0f}")

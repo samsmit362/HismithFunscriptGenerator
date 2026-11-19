@@ -30,9 +30,16 @@ class StreamTracks(list):
         COMPENSATED point (p - (ps - ps_baseline)) is what tracking_stream
         appends to `self`; the raw ps sequence is kept here as telemetry for
         the --motion complex step invariance: step = |(p-p_prev)-(ps-ps_prev)|.
-    """
+      * step: List[Optional[float]] - per-frame displacement (px) from the
+        previous ACCEPTED point to the current one, on the ps-COMPENSATED
+        trajectory (t_store).  1:1 with this list's slots; None on the first
+        accepted point (no previous) and on ghost slots.  Independent of
+        stroke direction / boundaries - the raw per-frame motion the
+        post-pass actually sees, persisted to ofs_result_raw.csv so a curve
+        can be re-derived if a stroke start / end was mis-detected.
+   """
     __slots__ = ("hold_frames", "hold_max_run", "rebinds",
-                 "times", "dup_skipped", "ghost_count", "ps")
+                 "times", "step", "dup_skipped", "ghost_count", "ps")
 
 
 class HoldoverPoint:

@@ -17,6 +17,7 @@ from core.interface.win32 import KEY_LEFT, KEY_RIGHT, key_held
 from core.matching import box_iou, match_active
 from core.tracking.seek import seek_to_time_exact
 from core.types import Person, ThrustCalibration
+from core.video_reader import open_video_reader
 
 
 def calibrate_thrust(video_path: str, start_s: float, fps: float,
@@ -52,16 +53,16 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
     `passive`, when provided, is drawn in the skeleton overlay next to the
     active one so you can visually see which person each skeleton belongs to.
     """
-    cap = cv2.VideoCapture(video_path)
-    # Reliable start seek (POS_MSEC based, see core.tracking.seek):
+    reader = open_video_reader(video_path)
+    # Reliable start seek (frame.pts based, see core.tracking.seek):
     # CAP_PROP_POS_FRAMES alone is unreliable on variable-frame-rate videos.
     # seek_to_time_exact ALSO reads the first frame and returns it together
     # with its REAL presentation time.
-    frame0, _t0, _seek_ok = seek_to_time_exact(cap, start_s, fps=fps)
+    frame0, _t0, _seek_ok = seek_to_time_exact(reader, start_s, fps=fps)
     if not _seek_ok:
-        # fall back to the legacy seek; cap.read() below then produces the
-        # first frame for us.
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_s * fps))
+        # fall back to a plain frame-index seek; reader.read() below then
+        # produces the first frame for us.
+        reader.seek_ms(start_s * 1000.0)
 
     # shared state for per-frame matching (last known point + box from the
     # identify stage) - so match_active picks "the person closest to where
@@ -83,12 +84,12 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
         # correlation filter and the EMA size state).  Feeding one frame
         # 20-30 times per second makes the tracked point jitter on a static
         # frame and pollutes the tracker state, while tracking_stream feeds
-        # it exactly once per NEW frame (cap.read() -> one update()).
-        # Call the detector only when the frame index actually changes —
+        # it exactly once per NEW frame (reader.read() -> one update()).
+        # Call the detector only when the frame's REAL time actually changes —
         # same contract as the video processing path.
         try:
-            cur = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-        except cv2.error:
+            cur = reader.current_time_ms
+        except Exception:
             cur = None  # seek race - treat as new frame (safe: one extra update)
         nonlocal detected_frame
         if detected_frame is not None and cur is not None and cur == detected_frame:
@@ -98,7 +99,7 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
         _cache.extend(tracker.detect_all(frame))
         return list(_cache)
 
-    # Scene transform (SOT only): every cap.read() below is passed through
+    # Scene transform (SOT only): every reader.read() below is passed through
     # _scene_apply, so the interactive loop and the SOT tracker work in the
     # SAME coordinate system (scene.apply(raw)).  identity scene -> same
     # ndarray, zero extra work.
@@ -116,10 +117,10 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
         pts: List[Tuple[float, float]] = []
         n = int(6.0 * fps)
         for _ in range(n):
-            ret, frame = cap.read()
-            if not ret:
+            nxt = reader.read()
+            if nxt is None:
                 break
-            frame = _scene_apply(frame)
+            frame = _scene_apply(nxt[0])
             persons = detect_persons(frame)
             if not persons:
                 continue
@@ -130,7 +131,7 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
                 idx = int(np.argmax([p.score for p in persons]))
             state["last_point"] = (persons[idx].point, persons[idx].box)
             pts.append(persons[idx].point)
-        cap.release()
+        reader.close()
         if len(pts) < 8:
             # RuntimeError, not sys.exit(str) (= os._exit): lets main() log
             # the reason to the stderr log before exiting with code 1.
@@ -213,11 +214,11 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
     if _seek_ok:
         # seek already decoded the first frame for us; use it.
         frame = frame0
-        ret = True
     else:
-        ret, frame = cap.read()
-    if not ret:
-        raise RuntimeError("Failed to read a calibration frame.")
+        nxt = reader.read()
+        if nxt is None:
+            raise RuntimeError("Failed to read a calibration frame.")
+        frame = nxt[0]
     frame = _scene_apply(frame)
 
     # "LMB drag = press b, release f" is STATEFUL - a release is only
@@ -367,7 +368,7 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
                 continue
             break
         if k in (ord('q'), ord('Q'), 27):
-            cap.release()
+            reader.close()
             cv2.destroyAllWindows()
             print("[cal] aborted by user")
             sys.exit(2)
@@ -386,14 +387,12 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
             mods = (cv2.waitKeyEx(1) >> 16) & 0xFF
             step = 10 if mods in (0x1, 0x2, 0x4) else 1
             delta = step if k == KEY_RIGHT else -15
-            cap.set(cv2.CAP_PROP_POS_FRAMES,
-                    max(0, int(cap.get(cv2.CAP_PROP_POS_FRAMES)) + delta))
-            ret, frame = cap.read()
-            if not ret:
+            nxt = reader.step(delta)
+            if nxt is None:
                 break
-            frame = _scene_apply(frame)
+            frame = _scene_apply(nxt[0])
 
-    cap.release()
+    reader.close()
     cv2.destroyAllWindows()
     if not (cal.f and cal.b):
         print("[cal] aborted by user (f or b missing)")

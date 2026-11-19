@@ -1,5 +1,5 @@
 """
-Reliable video seek by wall-clock time.
+Reliable video seek by wall-clock time, on top of BaseVideoReader.
 
 The classic OpenCV idiom
 
@@ -11,50 +11,37 @@ edit decisions, keyframe gaps): ``CAP_PROP_POS_FRAMES`` is a *nominal* index
 and the frame the decoder actually lands on may be 1-30+ frames off, and
 ``capsule.get(CAP_PROP_FPS)`` is only a container-level hint.
 
-``seek_to_time_exact`` instead:
-  1. jumps to a point ``safety_margin_seconds`` BEFORE the target
-     (``CAP_PROP_POS_MSEC`` -- a real keyframe-based seek);
-  2. decodes frame by frame with ``cap.grab()`` (header-only, much cheaper
-     than ``cap.retrieve()``), reading ``CAP_PROP_POS_MSEC`` after every
-     grab;
-  3. stops at the FIRST frame whose real timestamp satisfies
-     ``t >= target - (1/fps)/3`` (a one-third-frame early-stop buffer
-     against container timestamp jitter) and returns that frame (via
-     ``cap.retrieve()``);
-  4. on every successful return the function logs
-     ``[seek] target=...s found=...s diff=...ms`` (diff in ms) so the
-     operator can see how far the decoder actually landed;
-  5. the frozen-timestamp fallback now uses the caller-supplied ``fps``
-     (previously hardcoded at 30) so variable-rate videos are handled
-     correctly.
+``seek_to_time_exact`` instead asks the reader for the FIRST frame whose REAL
+presentation time (``frame.pts`` normalised against the stream start - see
+``core.video_reader``) satisfies ``t >= target - (1/fps)/3`` (a one-third-
+frame early-stop buffer against container timestamp jitter) and returns that
+frame.  The returned time (``t_sec``) IS the actual presentation time of the
+decoded frame - downstream code MUST use this value, not ``frame_index / fps``
+(per project requirement #2).
 
-The returned time (``t_sec``) IS the actual presentation time of the frame
-that was decoded -- downstream code MUST use this value, not
-``frame_index / fps`` (per project requirement #2).
-
-Backends that report ``CAP_PROP_POS_MSEC == 0`` for every frame (very old
-or exotic containers) are detected: after a small number of "frozen" steps
-the function falls back to the classic POS_FRAMES seek and re-reads, so the
-call never blocks forever on a pathological stream.
+The reader backend (``core.video_reader.PyAVVideoReader``) does the precise
+keyframe seek + codec-buffer flush + forward walk, so this helper stays a thin
+operator-facing wrapper that only adds the early-stop buffer and the
+``[seek] target=... found=... diff=...ms`` log line.
 """
 from typing import Optional, Tuple
 
 import numpy as np
 
 from core.logging import log
+from core.video_reader import BaseVideoReader
 
 
-def frame_timestamp_ms(cap) -> float:
+def frame_timestamp_ms(reader: BaseVideoReader) -> float:
     """
-    Current decode position of ``cap`` in milliseconds (as reported by the
-    container/timestamps).  Best-effort: on failure returns 0.0.  Use this
-    after EVERY ``cap.read()`` / ``cap.grab()`` / ``cap.retrieve()`` if the
-    caller needs the REAL time of the current frame (not a computed one).
+    Current decode position of ``reader`` in milliseconds (the REAL
+    ``frame.pts``-based presentation time of the most recently read frame).
+    Best-effort: returns 0.0 before the first frame is read.  Use this after
+    EVERY ``reader.read()`` / ``reader.seek_ms()`` if the caller needs the
+    REAL time of the current frame (not a computed one).
     """
-    import cv2  # lazy: the tracker modules import cv2 themselves; this
-                # helper is also called from test harnesses that patch cv2
     try:
-        v = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+        v = float(reader.current_time_ms)
     except Exception:
         return 0.0
     if v < 0.0:
@@ -62,23 +49,23 @@ def frame_timestamp_ms(cap) -> float:
     return v
 
 
-def seek_to_time_exact(cap, target_seconds: float,
+def seek_to_time_exact(reader: BaseVideoReader,
+                       target_seconds: float,
                        safety_margin_seconds: float = 2.0,
                        fps: float = 30.0
                        ) -> Tuple[Optional[np.ndarray], float, bool]:
     """
-    Move ``cap`` to the closest frame at time >=
+    Move ``reader`` to the closest frame at time >=
     ``target_seconds - (1/fps)/3`` (operator-required early-stop buffer).
 
-    ``fps`` is used in two places: the early-stop threshold (1/3 of a
-    frame's time subtracted to absorb container timestamp jitter) and the
-    frozen-timestamp fallback (frame-index = ``int(target * fps)``;
-    before 2026-09 this was hardcoded at 30).
+    ``fps`` is used ONLY for the early-stop threshold (1/3 of a frame's time
+    subtracted to absorb container timestamp jitter).  The actual frame time
+    comes from the reader's real ``frame.pts`` - NEVER from ``fps``.
 
     Returns
     -------
     (frame, t_sec, seeked) : frame=None on failure; t_sec is the REAL
-    CAP_PROP_POS_MSEC of the decoded frame (never frame_idx/fps);
+    presentation time of the decoded frame (never frame_idx/fps);
     seeked=False if no frame could be produced.
 
     On success the function logs
@@ -87,7 +74,6 @@ def seek_to_time_exact(cap, target_seconds: float,
 
     The function never raises; a failed seek returns (None, 0.0, False).
     """
-    import cv2
     if target_seconds is None:
         target_seconds = 0.0
     target_seconds = max(0.0, float(target_seconds))
@@ -105,76 +91,29 @@ def seek_to_time_exact(cap, target_seconds: float,
             f"found={t_found:.3f}s diff={diff_ms:+.1f}ms")
         return frame, t_found, True
 
-    # --- case A: start of the stream (no pre-seek needed) ---
-    if target_seconds <= 1e-9:
-        cap.set(cv2.CAP_PROP_POS_MSEC, 0.0)
-        cap.grab()
-        t0_ms = frame_timestamp_ms(cap)
-        ret, frame = cap.retrieve()
-        if not ret:
-            # stream may still be at EOF from a previous use; hard-seek home
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ret, frame = cap.read()
-            if not ret:
-                return None, 0.0, False
-            t0_ms = frame_timestamp_ms(cap)
-        return _log_and_return(frame, t0_ms)
+    # The reader's seek_ms already walks forward to the first frame whose
+    # real time is >= the requested ms (keyframe seek + codec flush + decode
+    # walk).  Pass the buffered threshold so we land just before the target.
+    frame, t_ms = (None, 0.0)
+    try:
+        res = reader.seek_ms(threshold_ms)
+        if res is not None:
+            frame, t_ms = res
+    except Exception:
+        frame, t_ms = None, 0.0
 
-    # --- case B: pre-seek then walk forward ---
-    pre_ms = max(0.0, (target_seconds - safety_margin_seconds) * 1000.0)
-    cap.set(cv2.CAP_PROP_POS_MSEC, pre_ms)
-    prev_ms = -1.0
-    frozen = 0
-    MAX_WALK = 4000  # hard cap: enough for any sensible safety margin
-    for _ in range(MAX_WALK):
-        if not cap.grab():
-            # grab() failed - either end of video OR the fake/test cap does
-            # not know the current index.  If we can fall back to a frame we
-            # CAN read at a valid index, do so (test harnesses); otherwise
-            # give up and let the caller try their own recovery.
-            t_real = frame_timestamp_ms(cap)
-            if t_real >= threshold_ms:
-                ret, frame = cap.retrieve()
-                if ret:
-                    t_real = frame_timestamp_ms(cap)
-                    return _log_and_return(frame, t_real)
-            return None, 0.0, False  # end of video / decode error
-        cur_ms = frame_timestamp_ms(cap)
-        if cur_ms >= threshold_ms:
-            ret, frame = cap.retrieve()
-            if not ret:
-                return None, 0.0, False
-            # re-read after retrieve() in case the backend shifts the
-            # reported position - this is the REAL time of *this* frame
-            t_real = frame_timestamp_ms(cap)
-            return _log_and_return(frame, t_real)
-        # frozen-timestamp guard (pathological streams)
-        if prev_ms >= 0 and cur_ms == prev_ms and target_seconds > 0:
-            frozen += 1
-            if frozen >= 30:
-                log("[seek] CAP_PROP_POS_MSEC is frozen; "
-                    "falling back to CAP_PROP_POS_FRAMES")
-                # fps is the CALLER-supplied value (not a hardcoded 30):
-                # target_seconds * fps = the nominal frame index for this
-                # target, as the classic CAP_PROP_POS_FRAMES idiom.
-                cap.set(cv2.CAP_PROP_POS_FRAMES,
-                        max(0, int(target_seconds * fps)))
-                ret, frame = cap.read()
-                if not ret:
-                    return None, 0.0, False
-                t_real = frame_timestamp_ms(cap)
-                return _log_and_return(frame, t_real)
-        else:
-            frozen = 0
-        prev_ms = cur_ms
-
-    # hard-capped: return whatever we landed on (better than nothing)
-    if cap.grab():
-        ok, fr2 = cap.retrieve()
-        if ok:
-            t_real = frame_timestamp_ms(cap)
-            return _log_and_return(fr2, t_real)
-    return None, 0.0, False
+    if frame is None:
+        # The target was past the end of the stream (or the reader failed):
+        # return whatever the last successfully decoded frame was, if any.
+        try:
+            cur = reader.read()
+            if cur is not None:
+                frame, t_ms = cur
+        except Exception:
+            pass
+    if frame is None:
+        return None, 0.0, False
+    return _log_and_return(frame, t_ms)
 
 
 def is_duplicate_frame(ms: float,
@@ -184,8 +123,8 @@ def is_duplicate_frame(ms: float,
     """
     Identify duplicated / repeated frames using the project rules:
 
-      3-1) CAP_PROP_POS_MSEC did not change  -> duplicate (fast path);
-      3-2) CAP_PROP_POS_MSEC changed but cv2.absdiff == 0  -> identical
+      3-1) presentation time (ms) did not change  -> duplicate (fast path);
+      3-2) time changed but cv2.absdiff == 0  -> identical
            pixels (still a duplicate).
 
     Both ``ms`` and ``frame`` must reflect the CURRENT frame; ``prev_ms`` /
@@ -230,8 +169,8 @@ def is_duplicate_frame(ms: float,
                     # The INTER_AREA method works as an ideal integrator (computes the mean per block)
                     block_size = 50
                     h, w = diff.shape
-                    grid_w = w // block_size
-                    grid_h = h // block_size
+                    grid_w = max(1, w // block_size)
+                    grid_h = max(1, h // block_size)
                     # Downsample the difference matrix to the grid size
                     grid_diff = cv2.resize(diff, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
                     # 4. Find the maximum mean deviation among the blocks

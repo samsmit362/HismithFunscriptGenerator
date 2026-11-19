@@ -43,7 +43,6 @@ from core.config import (LLM_DEFAULT_CLIP_S, LLM_DEFAULT_NUM_BATCH,
                          LLM_JPEG_QUALITY, LLM_REPEAT_PENALTY,
                          LLM_TEMPERATURE)
 from core.logging import log
-from core.tracking.seek import seek_to_time_exact
 
 #: hard cap on the number of images sent in ONE request - beyond that the
 #: multimodal context (image tokens + text) overflows most VLMs even at
@@ -354,22 +353,19 @@ def generate_track(video_path: str,
             f"[0.05, 60] seconds")
 
     # 1. figure out chunk count and total frame budget
-    log(f"[llm_gen] step 1/5: cv2.VideoCapture({video_path!r}) ...")
-    cap = cv2.VideoCapture(video_path)
-    log("[llm_gen] step 1/5: VideoCapture constructor returned "
-        f"opened={cap.isOpened()}")
-    if not cap.isOpened():
-        raise RuntimeError(f"[llm_gen] cannot open video: {video_path}")
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    log(f"[llm_gen] step 1/5: open_video_reader({video_path!r}) ...")
+    from core.video_reader import open_video_reader
+    reader = open_video_reader(video_path)
+    total = reader.frame_count
     if total <= 0:
-        cap.release()
+        reader.close()
         raise RuntimeError(f"[llm_gen] video has no frames: {video_path}")
     end_s = total / max(1e-6, fps)
     stop_s = p.stop_s if p.stop_s is not None else end_s
     t_hi = min(end_s, stop_s)
     span = max(0.0, t_hi - max(0.0, start_s))
     if span <= 0.0:
-        cap.release()
+        reader.close()
         raise RuntimeError(
             f"[llm_gen] empty span: start_s={start_s}, stop_s={stop_s}")
     # Each chunk covers clip_s of video; inside a chunk ALL frames are sent
@@ -385,24 +381,19 @@ def generate_track(video_path: str,
     # 2. fast seek to start_s.  We deliberately do NOT use
     #    seek_to_time_exact here: that helper scans forward frame-by-
     #    frame from `max(0, target - 2.0s)` and is a great fit for
-    #    the streaming path (real POS_MSEC timestamps), but on a
-    #    long file at e.g. 29:20 it means 50k+ grab() calls = a
+    #    the streaming path (real frame.pts timestamps), but on a
+    #    long file at e.g. 29:20 it means 50k+ decode calls = a
     #    ~100s stall BEFORE processing even ONE LLM chunk.  For
     #    the LLM pipeline we only need to START reading near start_s;
-    #    per-frame absolute time comes from cap.get(POS_MSEC) on
-    #    every read().  So a single O(1) keyframe seek + one read()
+    #    per-frame absolute time comes from the reader's real frame.pts
+    #    on every read().  So a single O(1) keyframe seek + one read()
     #    is sufficient AND fast, and we still read real frame
     #    timestamps for every subsequent frame.
-    cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(max(0.0, start_s) * fps)))
-    ret0, fr0 = cap.read()
-    if (not ret0) or (fr0 is None) or (fr0.size == 0):
-        # fallback for codecs whose POS_FRAMES is a bit unreliable
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, start_s) * 1000.0)
-        ret0, fr0 = cap.read()
-    if (not ret0) or (fr0 is None) or (fr0.size == 0):
-        cap.release()
+    res0 = reader.seek_ms(max(0.0, start_s) * 1000.0)
+    if res0 is None:
+        reader.close()
         raise RuntimeError(f"[llm_gen] seek to start_s={start_s} failed")
-    ts_ms0 = cap.get(cv2.CAP_PROP_POS_MSEC)
+    fr0, ts_ms0 = res0
     base_ts = ts_ms0 / 1000.0 if ts_ms0 > 0 else float(start_s)
     log(f"[llm_gen] fast-seek: target={start_s:.2f}s real ts={base_ts:.3f}s "
         f"delta={base_ts - start_s:+.3f}s")
@@ -411,9 +402,9 @@ def generate_track(video_path: str,
     pending_ts = float(base_ts)
 
     # 3. chunked pipeline: read a chunk -> LLM call -> map to track.
-    #    ONE seek only (above), then sequential cap.read() - this is what
-    #    makes the phase=starting stall go away (the old code did one
-    #    expensive seek_per_frame against a 30-minute file).
+    #    ONE seek only (above), then sequential reader.read() - this is
+    #    what makes the phase=starting stall go away (the old code did
+    #    one expensive seek_per_frame against a 30-minute file).
     def _read_next() -> Tuple[Optional[np.ndarray], float]:
         nonlocal pending_fr, pending_ts
         if pending_fr is not None:
@@ -421,10 +412,10 @@ def generate_track(video_path: str,
             pending_fr = None
             pending_ts = base_ts
             return fr, ts
-        ret, fr = cap.read()
-        if (not ret) or (fr is None) or fr.size == 0:
+        res = reader.read()
+        if res is None:
             return None, 0.0
-        ts_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+        fr, ts_ms = res
         ts = ts_ms / 1000.0 if ts_ms > 0 else 0.0
         return fr, float(ts)
 
@@ -516,8 +507,8 @@ def generate_track(video_path: str,
 
     log("[llm_gen] chunk loop DONE; track size at this point = %d"
         % (len(track),))
-    cap.release()
-    log("[llm_gen] VideoCapture released; checking track ...")
+    reader.close()
+    log("[llm_gen] video reader released; checking track ...")
 
     if not track and not aborted_early:
         log("[llm_gen] EMPTY track -> raising RuntimeError")

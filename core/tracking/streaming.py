@@ -47,6 +47,7 @@ from core.tracking.holdover import HoldoverPoint, StreamTracks
 from core.tracking.seek import (frame_timestamp_ms, is_duplicate_frame,
                                 seek_to_time_exact)
 from core.types import Person, ThrustCalibration
+from core.video_reader import open_video_reader
 from core.postpass.strokes import StrokeStateMachine
 from core.utilities import format_time
 from time import sleep
@@ -75,11 +76,12 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
 
     New invariants (2026-09):
       * the start frame is located with core.tracking.seek.seek_to_time_exact
-        (POS_MSEC pre-seek + per-frame walk), not CAP_PROP_POS_FRAMES;
-      * every tracked frame carries its REAL timestamp
-        (cap.get(CAP_PROP_POS_MSEC)) in tracks.times - NEVER frame_index/fps;
-      * DUPLICATE frames (same POS_MSEC as the accepted predecessor, or
-        pixel-identical: cv2.absdiff max == 0) are SKIPPED: they are neither
+        on the precise PyAV reader (frame.pts-based, not CAP_PROP_POS_FRAMES);
+      * every tracked frame carries its REAL presentation time
+        (frame.pts normalised against the stream start) in tracks.times -
+        NEVER frame_index/fps;
+      * DUPLICATE frames (same presentation time as the accepted predecessor,
+        or pixel-identical: cv2.absdiff max == 0) are SKIPPED: they are neither
         tracked, stored in tracks, nor fed to the stroke state machine;
       * GHOST frames (identity hold-over) are stored as None slots in tracks
         and are NOT fed to the live StrokeStateMachine - the post-pass
@@ -103,17 +105,20 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
         BOTH `tracks[slot]` and `tracks.ps[slot]`, so the parallel lists
         stay 1:1 through dedup / ghost filtering.
     """
-    cap = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    total_dur = total_frames / fps
-    # ── reliable start seek (NOT CAP_PROP_POS_FRAMES) ──────────────────
-    frame, first_t, seeked = seek_to_time_exact(cap, start_s, fps=fps)
+    # ── reliable start seek via the precise PyAV reader (NOT fps-based) ──
+    # Every frame's time is its REAL presentation timestamp (frame.pts,
+    # normalised against the stream start) - NEVER frame_index / fps.
+    reader = open_video_reader(video_path)
+    total_frames = reader.frame_count
+    total_dur = (reader.duration_s
+                 if reader.duration_s is not None else (total_frames / fps))
+    frame, first_t, seeked = seek_to_time_exact(reader, start_s, fps=fps)
     if not seeked or frame is None:
-        cap.release()
+        reader.close()
         raise RuntimeError(
             f"Failed to read the first frame at start={start_s:.3f}s "
             "(video too short or unseekable).")
-    # REAL presentation time of the first decoded frame (POS_MSEC based):
+    # REAL presentation time of the first decoded frame (frame.pts based):
     # used for stop_after_ms / preview % instead of the nominal start_s.
     first_t = max(0.0, first_t)
 
@@ -132,11 +137,12 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
     frame_idx = int(start_s * fps)          # nominal counter for % progress
     # ── per-frame bookkeeping (REAL time, duplicate/ghost filtering) ──
     time_list: List[float] = []             # parallel to `tracks`
+    step_list: List[Optional[float]] = []   # parallel to `tracks` (ps-compensated step)
     n_dup = 0                               # duplicate frames skipped
     n_ghost_out = 0                         # ghost frames stored as None
-    prev_ms: Optional[float] = None         # last ACCEPTED timestamp (ms)
+    prev_ms: Optional[float] = None         # last ACCEPTED presentation time (ms)
     prev_frame: Optional[np.ndarray] = None  # last ACCEPTED raw frame
-    cur_ms = frame_timestamp_ms(cap)        # current (first) frame timestamp
+    cur_ms = frame_timestamp_ms(reader)     # current (first) frame timestamp
     cur_t = first_t                         # current frame REAL time (sec)
     # first frame: initialize the duplicate baseline + process it inline
     prev_ms = cur_ms
@@ -208,16 +214,14 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
     # ── per-frame reader (REAL timestamp + duplicate baseline) ─────────
     # The loop above initialized `frame`/`cur_ms` (first frame after the
     # seek).  Each subsequent iteration pulls the NEXT frame and updates
-    # cur_ms / cur_t to its REAL presentation time (POS_MSEC) - NEVER
+    # cur_ms / cur_t to its REAL presentation time (frame.pts) - NEVER
     # computed from a frame index.
     def _pull_next():
         nonlocal frame, cur_ms, cur_t
-        if not cap.grab():
+        res = reader.read()
+        if res is None:
             return False
-        new_ms = frame_timestamp_ms(cap)
-        ret2, new_frame = cap.retrieve()
-        if not ret2:
-            return False
+        new_frame, new_ms = res
         frame = new_frame
         cur_ms = new_ms
         cur_t = new_ms / 1000.0
@@ -260,6 +264,7 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
             continue
 
         t = None
+        tracker.frame_time_ms = cur_ms
         persons = tracker.detect_all(frame)
         raw_anchor: Optional[Tuple[float, float]] = None
         rebind_now = False
@@ -336,6 +341,7 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
         ps_prev = ps_cur
         ps_cur = None
         if ps_tracker is not None:
+            ps_tracker.frame_time_ms = cur_ms
             ps_persons = ps_tracker.detect_all(frame)
             if ps_persons:
                 ps_cur = tuple(float(v) for v in ps_persons[0].point)
@@ -353,6 +359,12 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
                 and ps_cur is not None and ps_base is not None):
             t_store = (t_store[0] - (ps_cur[0] - ps_base[0]),
                        t_store[1] - (ps_cur[1] - ps_base[1]))
+        _t = f"({t[0]:.1f},{t[1]:.1f})" if t is not None else "-"
+        _ts = f"({t_store[0]:.1f},{t_store[1]:.1f})" if t_store is not None else "-"
+        _pc = f"({ps_cur[0]:.1f},{ps_cur[1]:.1f})" if ps_cur is not None else "-"
+        _pb = f"({ps_base[0]:.1f},{ps_base[1]:.1f})" if ps_base is not None else "-"
+        log(f"[stream] t={cur_t:.3f}s t_store={_ts} t={_t} "
+            f"ps_cur={_pc} ps_base={_pb}")
 
         # ── store the frame in the result (requirement #2 + #4) ──────────
         # GHOST frames (hold-over on the PRIMARY tracker) are stored as
@@ -362,26 +374,36 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
         # when ps was not usable on this frame, t_store == t (raw).
         # The RAW ps value is persisted 1:1 with tracks in tracks.ps
         # (requirement #2).
+        # ── per-frame step (ps-COMPENSATED) - 1:1 with `tracks` ─────────
+        # The displacement from the previous ACCEPTED point to the current
+        # one, on the ps-compensated trajectory (t_store).  Independent of
+        # stroke direction and boundaries: it is the raw per-frame motion
+        # that the post-pass will ACTUALLY see.  None on the first accepted
+        # point (no previous) and on ghost slots (stored as None in tracks).
+        step_now: Optional[float] = None
+        if t is not None and not ghost_now:
+            if last_track is not None:
+                step_now = float(np.hypot(t_store[0] - last_track[0],
+                                          t_store[1] - last_track[1]))
+                log(f"[stream] t={cur_t:.3f}s step={step_now:.2f}")
+                step_buf.append(step_now)
+                if len(step_buf) > 60:
+                    step_buf = step_buf[-60:]
+
         tracks.append(None if ghost_now else t_store)
-        time_list.append(cur_t)      # REAL time (POS_MSEC), 1:1 with tracks
+        time_list.append(cur_t)      # REAL time (frame.pts), 1:1 with tracks
         ps_list.append(None if ghost_now else ps_cur)
+        step_list.append(step_now)   # ps-compensated step, 1:1 with tracks
 
         # log(f"[tracking_stream] t:{t} ghost_now:{ghost_now}")
 
         # NB - use t_store (the ps-COMPENSATED point) not raw t: the whole
-        # rest of the accepted-frame bookkeeping (step buffer, hold-over auto
-        # tolerance, last_point / SM feed) operates on the COMPENSATED
-        # trajectory, so rebind detection, LK ghost windows and stroke
-        # amplitude all reflect what the post-pass will ACTUALLY see.
+        # rest of the accepted-frame bookkeeping (hold-over auto tolerance,
+        # last_point / SM feed) operates on the COMPENSATED trajectory, so
+        # rebind detection, LK ghost windows and stroke amplitude all
+        # reflect what the post-pass will ACTUALLY see.
         if t is not None and not ghost_now:
-            if last_track is not None:
-                step = float(np.hypot(t_store[0] - last_track[0],
-                                      t_store[1] - last_track[1]))
-                step_buf.append(step)
-                if len(step_buf) > 60:
-                    step_buf = step_buf[-60:]
-            if not ghost_now:
-                hold.push_accepted(last_track, t_store)
+            hold.push_accepted(last_track, t_store)
             last_track = t_store
             last_point = t_store
             if cand_person is not None:
@@ -569,7 +591,7 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
         cv2.putText(canvas, hint, ((PREVIEW_W - tw) // 2, th + 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-        cur_time = cur_t     # REAL time (POS_MSEC), not frame_idx/fps
+        cur_time = cur_t     # REAL time (frame.pts), not frame_idx/fps
         time_txt = f"{format_time(cur_time)} / {format_time(total_dur)}"
         (tw2, _), _ = cv2.getTextSize(time_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
         cv2.putText(canvas, time_txt, (PREVIEW_W - tw2 - 10, PREVIEW_H - 10),
@@ -628,19 +650,19 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
 
         frame_idx += 1
         # ── stop conditions (REAL time, per project requirement #2) ─────
-        # cur_t comes from cap.get(CAP_PROP_POS_MSEC) after the current
-        # retrieve.  Some backends report a STUCK timestamp (e.g. always 0)
-        # while still decoding forward, so we fall back to the NOMINAL
-        # frame_idx/fps value ONLY in that degenerate case.
+        # cur_t comes from the reader's REAL presentation time (frame.pts)
+        # after the current read.  Some backends report a STUCK timestamp
+        # (e.g. always 0) while still decoding forward, so we fall back to
+        # the NOMINAL frame_idx/fps value ONLY in that degenerate case.
         _real_t = (cur_t if cur_t > 1e-9 else (frame_idx / fps))
         if stop_after_ms is not None and (_real_t - first_t) * 1000.0 >= stop_after_ms:
             print(f"[stream] stop_after_ms reached ({stop_after_ms:.0f} ms)")
             break
         if stop_at is not None and _real_t >= stop_at:
             # Requirement #2: the NEW segment ends at the FIRST pre-existing
-            # point on the timeline (main.lua computed `stop_at` from the
-            # existing-points dump): stop after we've saved THIS frame so the
-            # new points meet the old ones without over-writing them.
+            # point on the timeline (main.lua passes `stop_at` via the
+            # --anchor-end-ms CLI param): stop after we've saved THIS frame
+            # so the new points meet the old ones without over-writing them.
             print(f"[stream] reached the first existing point on the timeline "
                   f"at {format_time(_real_t)} - stopping")
             break
@@ -648,7 +670,7 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
             print(f"[stream] {format_time(_real_t)} / {format_time(total_dur)}  "
                   f"({100 * frame_idx / max(total_frames, 1):.0f}%))")
 
-    cap.release()
+    reader.close()
     cv2.destroyAllWindows()
     if ps_tracker is not None:
         ps_tracker.close()
@@ -664,6 +686,7 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
     tracks.hold_max_run = hold.max_run
     tracks.rebinds = n_rebinds
     tracks.times = time_list          # REAL presentation time per track slot
+    tracks.step = step_list          # ps-compensated per-frame step, 1:1 with tracks
     tracks.dup_skipped = n_dup
     tracks.ghost_count = n_ghost_out
     if n_dup:
