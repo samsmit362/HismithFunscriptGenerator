@@ -574,21 +574,28 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
             if n_rev_commits > 0:
                 dyn_hint = f"[{n_rev_commits} rev]  "
 
-        hint = "q / space = stop & save   [hold S] = active+passive skeletons"
+        hint = "q/space = stop & save | [hold S] = show skeletons"
         if tracker.kind == "sot":
-            hint = "[R] = re-select ROI   " + hint
+            hint = "[R] = re-select ROI | " + hint
         if tracker.kind == "dino":
-            hint = "[R] = re-aim point p (ROI window)   " + hint
+            hint = "[R] = re-aim point p (ROI window) | " + hint
+        add_hints = []
+        if flow is not None:
+            add_hints.append(f"flow={flow.mode} win={flow.win_size}")
+        if ghost_now and hold.lost_run:
+            add_hints.append(f"[hold={hold.lost_run}")
+        if n_rebinds:
+            add_hints.append(f"[rebinds={n_rebinds}]")
+        if ps_tracker is not None:
+            hint = "[ps=on] | " + hint
+        # Show the analyzed frame size (after the SOT scene transform /
+        # res_zoom) - i.e. the exact resolution the trackers run on.
+        _afh, _afw = frame.shape[:2]
+        hint = f"size={_afw}x{_afh} | " + hint
         if dyn_hint:
             hint = dyn_hint + hint
-        if flow is not None:
-            hint = f"flow={flow.mode} win={flow.win_size}  |  {hint}"
-        if ghost_now and hold.lost_run:
-            hint = f"[hold={hold.lost_run}]  {hint}"
-        if n_rebinds:
-            hint = f"[rebinds={n_rebinds}]  {hint}"
-        if ps_tracker is not None:
-            hint = "[ps=on]  " + hint
+        if add_hints:
+            hint = f"{hint}\n{" | ".join(add_hints)}"
         (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
         cv2.putText(canvas, hint, ((PREVIEW_W - tw) // 2, th + 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)

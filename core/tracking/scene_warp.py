@@ -26,8 +26,15 @@ crop to a sub-region):
     4. crop      - the user-drawn scene ROI (a RECTANGLE in the
                     "zoom/rotate/pan" output space, pre-crop size equals
                     the input frame size)
+    5. res_zoom  - OUTPUT resolution scale (1x / 2x / 3x, discrete).  Set
+                    in the SOT ROI window (step 2), NOT in the scene window.
+                    It resizes the (cropped) output so the SAME region is
+                    shown at a HIGHER pixel resolution - higher zoom makes
+                    SOT-CSRT slower but noticeably more accurate.  The
+                    displayed region never changes; only its pixel size does.
 
-After the crop, downstream sees a (possibly smaller) ndarray of shape
+After the crop (and optional res_zoom resize), downstream sees a
+(possibly smaller/larger) ndarray of shape
 ``(outH, outW, 3)`` - the SOT tracker's init() / update() operate in THAT
 space and the stroke post-pass works in those pixels.
 """
@@ -70,6 +77,12 @@ class SceneTransform:
     pan_dx: float = 0.0
     pan_dy: float = 0.0
     scene_roi: Optional[Tuple[int, int, int, int]] = None
+    #: OUTPUT resolution scale (1x / 2x / 3x, discrete).  Set in the SOT ROI
+    #: window (step 2), NOT in the scene window.  It resizes the (cropped)
+    #: output so the SAME region is shown at a HIGHER pixel resolution -
+    #: higher zoom makes SOT-CSRT slower but noticeably more accurate.  The
+    #: displayed region never changes; only its pixel size does.
+    res_zoom: float = 1.0
     ref_w: Optional[int] = None
     ref_h: Optional[int] = None
 
@@ -80,6 +93,7 @@ class SceneTransform:
         self.pan_dx = 0.0
         self.pan_dy = 0.0
         self.scene_roi = None
+        self.res_zoom = 1.0
         self.ref_w = None
         self.ref_h = None
 
@@ -93,7 +107,8 @@ class SceneTransform:
         non-identity (conservative default).
         """
         if (self.zoom != 1.0 or self.angle_deg != 0.0
-                or self.pan_dx != 0.0 or self.pan_dy != 0.0):
+                or self.pan_dx != 0.0 or self.pan_dy != 0.0
+                or self.res_zoom != 1.0):
             return False
         if self.scene_roi is None:
             return True
@@ -134,6 +149,19 @@ class SceneTransform:
             x2 = max(x + 1, min(ow, x + rw))
             y2 = max(y + 1, min(oh, y + rh))
             out = out[y:y2, x:x2]
+        # res_zoom: output RESOLUTION scale - resize the (cropped) output so
+        # the SAME region is shown at a higher pixel resolution (x1/x2/x3).
+        # The region never changes; only the pixel size does.  The window
+        # (fit) and the tracker both re-derive their scale from the returned
+        # shape, so a higher res_zoom = more pixels under the SOT tracker
+        # for the exact same on-screen region (slower but more accurate).
+        if self.res_zoom != 1.0:
+            oh, ow = int(out.shape[0]), int(out.shape[1])
+            nh = max(2, int(round(oh * float(self.res_zoom))))
+            nw = max(2, int(round(ow * float(self.res_zoom))))
+            flags = (cv2.INTER_LINEAR if self.res_zoom > 1.0
+                     else cv2.INTER_AREA)
+            out = cv2.resize(out, (nw, nh), interpolation=flags)
         # remember the reference frame size for shape-less is_identity()
         if self.ref_w is None or self.ref_h is None:
             self.ref_w, self.ref_h = int(w), int(h)
@@ -152,7 +180,7 @@ class SceneTransform:
             roi = f"{w}x{h} @ ({x},{y})"
         return (f"zoom={self.zoom:g}  angle={self.angle_deg:+g}deg  "
                 f"pan=({int(self.pan_dx):+d},{int(self.pan_dy):+d})  "
-                f"roi={roi}")
+                f"res={self.res_zoom:g}x  roi={roi}")
 
 
 def _warp_view(frame: np.ndarray, zoom: float, angle_deg: float,
@@ -182,4 +210,36 @@ def _warp_view(frame: np.ndarray, zoom: float, angle_deg: float,
     return cv2.warpAffine(frame, M, (w, h),
                           flags=cv2.INTER_LINEAR,
                           borderMode=cv2.BORDER_REPLICATE)
+
+
+def _reanchor_pan(zoom_old: float, angle_old: float,
+                  pan_dx_old: float, pan_dy_old: float,
+                  zoom_new: float, angle_new: float,
+                  w: int, h: int) -> Tuple[float, float]:
+    """New output-space pan that keeps the source point under the OUTPUT
+    center fixed when zoom/angle change.
+
+    The zoom/rotate are anchored to the FRAME center (w/2, h/2), not to the
+    view center.  When the user has panned the view away from the frame
+    center and then changes the zoom (or angle), the source point under the
+    view center would jump.  Adjusting the pan by the difference keeps the
+    SAME source point under the view center - so zooming/rotating "zooms
+    into" the point the user has centered, instead of jumping to the frame
+    center.
+    """
+    cx, cy = w / 2.0, h / 2.0
+    r_old = cv2.getRotationMatrix2D((cx, cy), float(angle_old), float(zoom_old))
+    r_new = cv2.getRotationMatrix2D((cx, cy), float(angle_new), float(zoom_new))
+    A_old = r_old[:, 0:2]
+    b_old = r_old[:, 2:3]
+    A_new = r_new[:, 0:2]
+    b_new = r_new[:, 2:3]
+    C = np.array([[cx], [cy]], dtype=np.float64)
+    pan_old = np.array([[float(pan_dx_old)], [float(pan_dy_old)]],
+                       dtype=np.float64)
+    # source point currently under the output center
+    s_center = np.linalg.inv(A_old) @ (C - b_old - pan_old)
+    # new pan that puts that same source point under the output center
+    pan_new = C - b_new - A_new @ s_center
+    return float(pan_new[0, 0]), float(pan_new[1, 0])
 

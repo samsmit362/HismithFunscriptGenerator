@@ -27,7 +27,7 @@ from core.interface.preview import (PREVIEW_H, PREVIEW_W, draw_skeleton, fit,
                                     setup_window, tracker_label)
 from core.interface.win32 import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, key_held
 from core.tracking.scene_warp import (ANGLE_STEP_DEG, PAN_CLAMP_PX, PAN_STEP_PX,
-                                      SceneTransform, ZOOM_LEVELS)
+                                      SceneTransform, ZOOM_LEVELS, _reanchor_pan)
 from core.tracking.seek import seek_to_time_exact
 from core.types import Person
 from core.video_reader import open_video_reader
@@ -167,15 +167,19 @@ def _setup_scene(frame: np.ndarray,
     is returned immediately without opening a window.
 
     Keys in the window:
-        +/-        zoom in / out  (1x -> 2x -> 3x)
-        [ / ]      rotate +15 / -15 deg  (clamped -180..180)
+        +/-        zoom in / out  (1x -> 2x -> 3x) - the source point under
+                 the view center is kept fixed (the pan is re-anchored), so
+                 zooming "zooms into" the centered point instead of jumping
+                 to the frame center
+        [ / ]      rotate +15 / -15 deg  (clamped -180..180) - same
+                 center-keeping re-anchor as zoom
         Left/Right pan left/right 10 px (in output space)
         Up/Down    pan up/down  10 px  (in output space)
         R          reset all settings to identity
         Q / Esc    abort  (exit code 2)
         Enter/Space  confirm
         LMB drag   draw the scene-ROI rectangle (in OUTPUT/warped space);
-                   release fixes it, re-drag to re-select.
+                    release fixes it, re-drag to re-select.
 
     The result is stored on ``tracker.scene``; downstream code (calibrate,
     tracking_stream, SOT tracker) reads ``tracker.scene`` and calls
@@ -187,13 +191,16 @@ def _setup_scene(frame: np.ndarray,
         print("[scene] --no-scene-roi: identity (full frame, no transform)")
         return sc
 
-    # seed from the tracker's existing scene (R-reselect path keeps it)
+    # seed from the tracker's existing scene (R-reselect path keeps it);
+    # res_zoom is carried over too - it is tuned in the ROI window (step 2),
+    # but must survive a re-aim so the tracker keeps the same resolution.
     sc = SceneTransform()
     prev = getattr(tracker, "scene", None)
     if prev is not None:
         sc = SceneTransform(zoom=prev.zoom, angle_deg=prev.angle_deg,
                             pan_dx=prev.pan_dx, pan_dy=prev.pan_dy,
-                            scene_roi=prev.scene_roi)
+                            scene_roi=prev.scene_roi,
+                            res_zoom=prev.res_zoom)
 
     H, W = frame.shape[:2]
     win = (f"SOT scene [{tracker_label(tracker)}]: +/- zoom  [ ] rotate  "
@@ -263,6 +270,9 @@ def _setup_scene(frame: np.ndarray,
             except ValueError:
                 pass
             if i < len(ZOOM_LEVELS) - 1:
+                sc.pan_dx, sc.pan_dy = _reanchor_pan(
+                    sc.zoom, sc.angle_deg, sc.pan_dx, sc.pan_dy,
+                    ZOOM_LEVELS[i + 1], sc.angle_deg, W, H)
                 sc.zoom = ZOOM_LEVELS[i + 1]
         elif k in (ord('-'), ord('_')):
             i = 0
@@ -271,11 +281,24 @@ def _setup_scene(frame: np.ndarray,
             except ValueError:
                 pass
             if i > 0:
+                sc.pan_dx, sc.pan_dy = _reanchor_pan(
+                    sc.zoom, sc.angle_deg, sc.pan_dx, sc.pan_dy,
+                    ZOOM_LEVELS[i - 1], sc.angle_deg, W, H)
                 sc.zoom = ZOOM_LEVELS[i - 1]
         elif k in (ord(']'),):
-            sc.angle_deg = max(-180.0, sc.angle_deg - ANGLE_STEP_DEG)
+            new_angle = max(-180.0, sc.angle_deg - ANGLE_STEP_DEG)
+            if new_angle != sc.angle_deg:
+                sc.pan_dx, sc.pan_dy = _reanchor_pan(
+                    sc.zoom, sc.angle_deg, sc.pan_dx, sc.pan_dy,
+                    sc.zoom, new_angle, W, H)
+                sc.angle_deg = new_angle
         elif k in (ord('['),):
-            sc.angle_deg = min(180.0, sc.angle_deg + ANGLE_STEP_DEG)
+            new_angle = min(180.0, sc.angle_deg + ANGLE_STEP_DEG)
+            if new_angle != sc.angle_deg:
+                sc.pan_dx, sc.pan_dy = _reanchor_pan(
+                    sc.zoom, sc.angle_deg, sc.pan_dx, sc.pan_dy,
+                    sc.zoom, new_angle, W, H)
+                sc.angle_deg = new_angle
         elif k in (KEY_LEFT,):
             sc.pan_dx = max(-PAN_CLAMP_PX, sc.pan_dx - PAN_STEP_PX)
         elif k in (KEY_RIGHT,):
@@ -335,6 +358,20 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
     # the scene was already fixed) skips the window entirely; the fast path
     # returns the original frame (identity apply) with no extra work.
     _setup_scene(frame, tracker, skip=no_scene)
+    # ── output resolution scale (res_zoom, discrete x1/x2/x3) ─────────────
+    # This window owns the res_zoom: the displayed region NEVER changes,
+    # +/- only change its PIXEL resolution (higher = SOT-CSRT slower but
+    # noticeably more accurate).  The SOT tracker operates on the RESIZED
+    # frame, so the ROI coordinates live in the resized space; the final
+    # res_zoom is stored on tracker.scene.res_zoom so tracking_stream /
+    # calibrate / the ps-clone apply the SAME resize (one shared
+    # coordinate space for the whole run).
+    res_zoom = 1.0
+    if tracker.scene is not None:
+        res_zoom = float(tracker.scene.res_zoom)
+        # the window takes ownership of the zoom: apply() must return the
+        # BASE (un-resized) scene frame so the loop resizes it live.
+        tracker.scene.res_zoom = 1.0
     # step 2: seed the ROI drag on the SCENE-SEEDED warped frame (identity
     # fast path when no scene transform is set -> SAME ndarray, zero copy)
     # The SOT tracker then sees the SAME frame in init() and in the
@@ -342,15 +379,29 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
     # coordinate remapping is required downstream.
     frame = tracker.scene.apply(frame) if tracker.scene is not None else frame
     win = (f"SOT [{tracker_label(tracker)}]: LMB=ROI p (green), "
-           f"Ctrl+LMB=ROI ps (blue)   R=clear   Enter=confirm   Q=abort")
+           f"Ctrl+LMB=ROI ps (blue)  +/- res x1..x3  R=clear  "
+           f"Enter=confirm  Q=abort")
     setup_window(win)
     drag = _drag_for(win)
     _drag_reset(win)
 
-    roi_frame = None   # (x, y, w, h) in FRAME coordinates - point p (green)
-    ps_frame = None    # (x, y, w, h) in FRAME coordinates - static ps (blue)
+    roi_frame = None   # (x, y, w, h) in RESIZED-frame coordinates - p (green)
+    ps_frame = None    # (x, y, w, h) in RESIZED-frame coordinates - ps (blue)
     init_err = None    # last tracker.init() failure -> shown as a red hint
     H, W = frame.shape[:2]
+
+    def _rescale_rop(f: float) -> None:
+        """Scale the fixed ROI(s) by f when the output resolution changes
+        (the on-screen region stays the same, only the pixel size changes)."""
+        nonlocal roi_frame, ps_frame
+        def rs(r):
+            if r is None:
+                return None
+            x, y, w, h = r
+            return (max(0, int(round(x * f))), max(0, int(round(y * f))),
+                    max(1, int(round(w * f))), max(1, int(round(h * f))))
+        roi_frame = rs(roi_frame)
+        ps_frame = rs(ps_frame)
 
     def _to_frame(mx, my, scale, x0, y0):
         return max(0, min(W, int((mx - x0) / scale))), \
@@ -371,7 +422,23 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
     while True:
-        view, scale, x0, y0 = fit(frame)
+        # resize the SAME region to the current output resolution scale:
+        # the displayed region never changes, only its pixel size does
+        # (higher res_zoom = more pixels under the SOT tracker = slower but
+        # more accurate).  H/W are refreshed every iteration so _to_frame
+        # clamps into the CURRENT resolution space (the closure reads the
+        # names live).
+        if res_zoom == 1.0:
+            disp = frame
+        else:
+            dh = max(2, int(round(frame.shape[0] * res_zoom)))
+            dw = max(2, int(round(frame.shape[1] * res_zoom)))
+            disp = cv2.resize(frame, (dw, dh),
+                              interpolation=(cv2.INTER_LINEAR
+                                             if res_zoom > 1.0
+                                             else cv2.INTER_AREA))
+        H, W = disp.shape[:2]
+        view, scale, x0, y0 = fit(disp)
         # ── live ROI p (green, required, plain LMB) ──
         if drag.p.down and drag.p.anchor is not None:
             ax, ay = _to_frame(drag.p.anchor[0], drag.p.anchor[1], scale, x0, y0)
@@ -396,8 +463,10 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
                 (ew, _eh), _ = cv2.getTextSize(err, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
             cv2.putText(view, err, ((PREVIEW_W - ew) // 2, PREVIEW_H - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 64, 255), 2)
-        info = ("LMB=draw p ROI (release=fixed)   Ctrl+LMB=draw ps ROI "
-                "(release=fixed)   R=clear all    Enter=confirm    Q=abort")
+        info = (f"LMB=draw p ROI   Ctrl+LMB=draw ps ROI (release=fixed)   "
+                f"+/- resolution zoom x1..x3 "
+                f"(now x{res_zoom:g} size={disp.shape[1]}x{disp.shape[0]}) "
+                f"R=clear all   Enter=confirm   Q=abort")
         (tw, th), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
         cv2.putText(view, info, ((PREVIEW_W - tw) // 2, PREVIEW_H - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
@@ -415,6 +484,26 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
             init_err = None
             _drag_reset(win)
             continue
+        # +/- : change the OUTPUT RESOLUTION (x1/x2/x3) of the same region
+        # (higher zoom = SOT-CSRT slower but noticeably more accurate).
+        # The fixed ROI(s) are rescaled into the new resolution space and a
+        # live drag is cancelled (its anchor is in the old resolution space).
+        if k in (ord('+'), ord('='), ord('-'), ord('_')):
+            try:
+                i = ZOOM_LEVELS.index(res_zoom)
+            except ValueError:
+                i = 0
+            if k in (ord('+'), ord('=')):
+                ni = min(i + 1, len(ZOOM_LEVELS) - 1)
+            else:
+                ni = max(i - 1, 0)
+            if ni != i:
+                res_zoom = ZOOM_LEVELS[ni]
+                _rescale_rop(res_zoom / ZOOM_LEVELS[i])
+                _drag_reset(win)
+                print(f"[identify] SOT output resolution -> x{res_zoom:g} "
+                      f"(same region, {disp.shape[1]}x{disp.shape[0]} px)")
+            continue
         if k in (13, 32):  # Enter / Space - confirm (p required, ps optional)
             if roi_frame is None:
                 print("[identify] press + hold LMB to draw the p ROI first")
@@ -428,6 +517,20 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
             # (invalid params raise a cv2 exception), so do NOT check the
             # return value. On failure keep the window open and let the user
             # re-draw the ROI (red hint + logged traceback reason).
+            # Persist the chosen output resolution on the shared scene so
+            # tracking_stream / calibrate / the ps-clone resize the SAME way
+            # (one coordinate space for the whole run).  The tracker must be
+            # initialized on the RESIZED frame: the ROI (x,y,w,h) is in
+            # resized coordinates, and every later detect_all(update) call in
+            # tracking_stream receives scene.apply(raw) = the same resize.
+            if tracker.scene is not None:
+                tracker.scene.res_zoom = res_zoom
+            _init_frame = frame
+            if res_zoom != 1.0:
+                _ih = max(2, int(round(frame.shape[0] * res_zoom)))
+                _iw = max(2, int(round(frame.shape[1] * res_zoom)))
+                _init_frame = cv2.resize(frame, (_iw, _ih),
+                                         interpolation=cv2.INTER_LINEAR)
             try:
                 # duck-typed: trackers that care about the video frame index
                 # (gsam2, i.e. SAM 2) set `pending_seed_frame` (consumed by
@@ -436,7 +539,7 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
                 if hasattr(tracker, "pending_seed_frame") and \
                         current_video_frame is not None:
                     tracker.pending_seed_frame = current_video_frame
-                tracker.init(frame, (x, y, w, h))
+                tracker.init(_init_frame, (x, y, w, h))
             except Exception as e:
                 tracker.reset()  # discard the half-initialized tracker
                 # A bare exception like `OSError()` (errno=None, empty args)
