@@ -38,7 +38,7 @@ from core.video_reader import open_video_reader
 def select_llm_roi(video_path: str,
                    start_s: float,
                    fps: float,
-                   win: str = "LLM ROI (LMB drag, Enter=OK, Q=abort)"
+                   win: str = "LLM ROI [ollama] (LMB drag, Enter=OK, Q=abort)"
                    ) -> Optional[Tuple[int, int, int, int]]:
     """Open the ROI window.  Returns the fixed crop in FRAME pixels
     (x, y, w, h) or None when the user aborts (Q / Esc).

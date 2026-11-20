@@ -49,6 +49,17 @@ def setup_window(win: str, w: int = PREVIEW_W, h: int = PREVIEW_H) -> None:
     center_window(win, w, h)
 
 
+def tracker_label(tracker) -> str:
+    """Short display name of the tracking method for window titles / hints
+    (the registry name, e.g. 'sot-csrt'; falls back to the tracker kind,
+    then '?', for manually constructed tracker objects)."""
+    n = getattr(tracker, "name", None)
+    if n:
+        return str(n)
+    k = getattr(tracker, "kind", None)
+    return str(k) if k else "?"
+
+
 # bone index pairs per keypoint format (17 = COCO/YOLO, >=33 = mediapipe)
 COCO_BONES = ((0, 1), (0, 2), (1, 3), (2, 4), (5, 6), (5, 7), (7, 9),
               (6, 8), (8, 10), (5, 8), (6, 8), (11, 12), (11, 13), (13, 15),

@@ -31,16 +31,18 @@ points can be further edited by hand.
 
 ## Tracker backends
 
-| Tracker          | Kind | Description                                                    |
-|------------------|------|----------------------------------------------------------------|
-| `yolo`           | pose   | YOLOv8 / v11 / v26 pose (COCO-17 keypoints)                   |
-| `mediapipe`      | pose   | MediaPipe pose (33 landmarks)                                 |
-| `groundingdino`  | dino   | GroundingDINO — open-vocabulary text-prompt detection         |
-| `sot-vit`        | sot    | OpenCV `TrackerVit` (ONNX) on a drawn ROI                     |
-| `sot-mil`        | sot    | OpenCV `TrackerMIL` (online multiple-instance learning)       |
-| `sot-csrt`       | sot    | OpenCV `TrackerCSRT` on a drawn ROI                           |
-| `sot-kcf`        | sot    | OpenCV `TrackerKCF` on a drawn ROI                            |
-| `ostrack`        | sot    | OSTrack — one-stream ViT SOT on ONNX (highest accuracy)       |
+| Tracker          | Kind | Description                                                                  |
+|------------------|------|------------------------------------------------------------------------------|
+| `sot-csrt`       | sot    | OpenCV `TrackerCSRT` on a drawn ROI (max accuracy)                         |
+| `sot-kcf`        | sot    | OpenCV `TrackerKCF` on a drawn ROI                                         |
+| `sot-vit`        | sot    | OpenCV `TrackerVit` (ONNX) on a drawn ROI                                  |
+| `sot-mil`        | sot    | OpenCV `TrackerMIL` (online multiple-instance learning)                    |
+| `ostrack`        | sot    | OSTrack — one-stream ViT SOT on ONNX                                       |
+| `yolo`           | pose   | YOLOv8 / v11 / v26 pose (COCO-17 keypoints)                                |
+| `mediapipe`      | pose   | MediaPipe pose (33 landmarks)                                              |
+| `groundingdino`  | dino   | GroundingDINO — open-vocabulary text-prompt detection                      |
+| `gsam2`          | mask   | Grounded SAM 2, pixel-mask silhouette                                      |
+| `ollama`         | LLM    | LLM: draw a ROI, the model reads all sampled frames (slow, for hard clips) |
 
 ## Requirements
 
@@ -54,12 +56,12 @@ points can be further edited by hand.
 
   # Create Python virtual environment directory:
   py -m venv {VENV_DIR_NAME}
-  
+
   # Set "Python cmd" in GUI to your real full path to python with virtual environment:
   {VENV_DIR_FULL_PATH}\Scripts\python.exe
 
   # Minimal requirements setup:
-  {VENV_DIR_FULL_PATH}\Scripts\python.exe -m pip install opencv-contrib-python numpy simplification
+  {VENV_DIR_FULL_PATH}\Scripts\python.exe -m pip install opencv-contrib-python numpy simplification av
 
   # Full requirements setup:
   {VENV_DIR_FULL_PATH}\Scripts\python.exe -m pip install -r requirements.txt
@@ -76,6 +78,7 @@ points can be further edited by hand.
 ```
 Hismith Funscript Generator\
 ├── main.lua            (OFS extension: GUI, process management, result import)
+├── tools.lua           (auxiliary OFS tools: scale / move / align / stretch / insert)
 ├── funscript_gen.py    (thin CLI: argparse + _run() pipeline entry point)
 ├── requirements.txt    (single source of truth: pip install -r requirements.txt)
 ├── core/               (all generation logic)
@@ -84,10 +87,11 @@ Hismith Funscript Generator\
 │   ├── matching.py     (match_active, box_iou)
 │   ├── logging.py      (log, log_file)
 │   ├── utilities.py    (parse_time, format_time)
-│   ├── detectors/      (yolo, mediapipe, groundingdino, sot-*, ostrack, box, models)
+│   ├── video_reader.py (BaseVideoReader / PyAV reader: precise PTS-based frame times)
+│   ├── detectors/      (yolo, mediapipe, groundingdino, sot-*, ostrack, gsam2, ollama, box, models)
 │   ├── tracking/       (scene_warp, streaming, seek, flow_refiner, holdover, scaling)
-│   ├── postpass/       (strokes, positions, rdp_core, funscript, vlm)
-│   └── interface/      (identify, calibrate, rdp_ui, preview, win32)
+│   ├── postpass/       (strokes, positions, rdp_core, funscript, vlm, llm_gen, llm_stats)
+│   └── interface/      (identify, calibrate, rdp_ui, preview, win32, llm_roi, llm_thinking)
 ├── 3rdParty/           (vendored third-party code)
 │   └── rxi/
 │       └── json.lua    (JSON library - needed to parse the result)

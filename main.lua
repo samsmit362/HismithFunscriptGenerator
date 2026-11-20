@@ -46,8 +46,60 @@ status = "Idle"
 lastError = ""
 addedCount = 0
 
+-- ── tracker registry (single source of truth for the GUI combo + CLI name) ──
+-- One numeric ID per tracker (the GUI combo index).  The TRACKERS table
+-- maps ID -> the combo label, TRACKER_NAMES maps ID -> the CLI --tracker
+-- name.  Every per-tracker GUI branch below compares against these
+-- constants, never against raw index numbers, so reordering the list
+-- never breaks the code.
+TRACKER_SOT_CSRT = 1
+TRACKER_SOT_KCF = 2
+TRACKER_SOT_VIT = 3
+TRACKER_SOT_MIL = 4
+TRACKER_OSTRACK = 5
+TRACKER_YOLO = 6
+TRACKER_MEDIAPIPE = 7
+TRACKER_GROUNDINGDINO = 8
+TRACKER_GSAM2 = 9
+TRACKER_OLLAMA = 10
+TRACKERS = {
+    "sot-csrt - OpenCV single-object tracker (ROI) (max accuracy)",
+    "sot-kcf - OpenCV single-object tracker (ROI)",
+    "sot-vit - OpenCV ViT tracker (ROI)",
+    "sot-mil - OpenCV MIL tracker (ROI)",
+    "ostrack - ViT one-stream (ONNX)",
+    "yolo - pose (default)",
+    "mediapipe - pose (33 landmarks)",
+    "groundingdino - text-prompt boxes",
+    "gsam2 - Grounded SAM 2, pixel-mask silhouette",
+    "ollama - LLM: draw a ROI, the model reads all sampled frames (slow, for hard clips)",
+}
+TRACKER_NAMES = {
+    "sot-csrt",
+    "sot-kcf",
+    "sot-vit",
+    "sot-mil",
+    "ostrack",
+    "yolo",
+    "mediapipe",
+    "groundingdino",
+    "gsam2",
+    "ollama",
+}
+-- SOT family = the ROI-drag trackers (point p = the ROI center, the
+-- "Tracked point (p)" combo is hidden for them and --point is not sent):
+-- the four OpenCV SOT algos + ostrack + gsam2.
+SOT_FAMILY = {
+    [TRACKER_SOT_CSRT] = true,
+    [TRACKER_SOT_KCF] = true,
+    [TRACKER_SOT_VIT] = true,
+    [TRACKER_SOT_MIL] = true,
+    [TRACKER_OSTRACK] = true,
+    [TRACKER_GSAM2] = true,
+}
+
 -- settings (survive gui redraws)
-trackerIdx = 3    -- 1=yolo, 2=mediapipe, 3..6=sot-*, 7=groundingdino, 8=ostrack
+trackerIdx = TRACKER_SOT_CSRT -- default: sot-csrt (see the TRACKERS / TRACKER_NAMES tables above)
 prevTrackerIdx = trackerIdx
 yoloModelIdx = 15 -- 1-5=yolov8 n..x, 6-10=yolo11 n..x, 11-15=yolo26 n..x (default 15=yolo26x-pose)
 dinoModelIdx = 1  -- 1=swinb (default, Swin-B 56.7 AP), 2=swint (Swin-T 48.4 AP)
@@ -64,10 +116,10 @@ lastDinoScan = nil    -- cached result of ensureDinoTargets (nil = not scanned)
 dinoCustomPrompt = "" -- non-empty = overrides the target's built-in phrase
 -- two SEPARATE ONNX weight pickers - each is shown ONLY for the tracker that
 -- consumes the folder (exactly like the YOLO combo shows only when
--- trackerIdx==1 and the DINO combo only when trackerIdx==7):
---   * ostrackModel / ostrackModelIdx -> models/ostrack/*.onnx   (OSTrack weights, tracker idx 8)
---   * vitModels    / vitModelIdx    -> models/vittrack/*.onnx  (sot-vit TrackerVit weights, tracker idx 5)
--- sot-mil trains its classifier online, csrt/kcf are self-contained —
+-- trackerIdx==TRACKER_YOLO and the DINO combo only when trackerIdx==TRACKER_GROUNDINGDINO):
+--   * ostrackModel / ostrackModelIdx -> models/ostrack/*.onnx   (OSTrack weights, TRACKER_OSTRACK)
+--   * vitModels    / vitModelIdx    -> models/vittrack/*.onnx  (sot-vit TrackerVit weights, TRACKER_SOT_VIT)
+-- sot-mil trains its classifier online, csrt/kcf are self-contained -
 -- NEITHER combo applies to them (the pickers only forward when the tracker
 -- consumes them, i.e. tracker==ostrack or tracker==sot-vit).
 -- Both lists are scanned LAZILY (see ensureFamilyModels) - never inside the
@@ -77,7 +129,7 @@ ostrackModels = {}
 ostrackModelIdx = 1 -- 1 = auto (first in models/ostrack/)
 vitModels = {}
 vitModelIdx = 1     -- 1 = auto (first in models/vittrack/)
--- Grounded SAM2 (gsam2, tracker idx 9): checkpoint list comes from
+-- Grounded SAM2 (gsam2, TRACKER_GSAM2): checkpoint list comes from
 -- `funscript_gen.py --list sam2` (single source of truth =
 -- core/detectors/models.py SAM2_VARIANTS, default printed FIRST so combo
 -- index 1 = it), LAZY+CACHED like dinoTargets (see ensureSam2Models).
@@ -95,7 +147,7 @@ useCalibrate = true   -- interactive f/b calibration window (default on)
 autoPartners = false  -- skip the identify window (auto: person1=active, person2=passive)
 noSceneRoi = false    -- SOT only: skip the scene-ROI setup window (full frame, identity transform)
 useVlm = false
--- ── LLM (Ollama) generation mode: tracker idx 10 ──
+-- ── LLM (Ollama) generation mode: TRACKER_OLLAMA ──
 -- Single source of truth for the LLM CLI defaults: core/config.py
 -- LLM_DEFAULT_* (0.5s / 200000 / 32000 / 2048 / 1920).  The GUI
 -- mirrors the same defaults (see funscript_gen.py CLI help for each
@@ -482,12 +534,10 @@ function startGeneration()
     local of = io.open(outFile, "w")
     if of then of:close() end
 
-    local trackers = { "yolo", "mediapipe", "sot-csrt", "sot-kcf", "sot-vit", "sot-mil", "groundingdino", "ostrack",
-        "gsam2", "ollama" }
     -- note: point is only forwarded for yolo/mediapipe (the POSE-tracker
     -- body zone); gsam2 / ostrack / sot-* use the ROI the user draws, so
     -- the --point combo is intentionally hidden for them (and not sent).
-    local tracker = trackers[trackerIdx] or "sot-csrt"
+    local tracker = TRACKER_NAMES[trackerIdx] or TRACKER_NAMES[1]
     local yoloModels = { "yolov8n-pose", "yolov8s-pose", "yolov8m-pose", "yolov8l-pose", "yolov8x-pose",
         "yolo11n-pose", "yolo11s-pose", "yolo11m-pose", "yolo11l-pose", "yolo11x-pose",
         "yolo26n-pose", "yolo26s-pose", "yolo26m-pose", "yolo26l-pose", "yolo26x-pose" }
@@ -729,16 +779,26 @@ end
 -- single log file: python writes it directly (funscript_gen.py _file_log);
 -- the GUI "Open stderr log" button and the tail preview read the same file
 local LOG_NAME = "funscript_gen.stderr.log"
+local activeProcesses = {}
 
 function openLog()
-    local log = ofs.ExtensionDir() .. "\\" .. LOG_NAME
+    for i = #activeProcesses, 1, -1 do
+        if not activeProcesses[i]:alive() then
+            table.remove(activeProcesses, i)
+        end
+    end
+    local dir = ofs.ExtensionDir():gsub("/", "\\")
+    local log = dir .. "\\" .. LOG_NAME
     print("[HF] opening log: " .. log)
-    local ok, err = pcall(Process.new, "notepad.exe", log)
-    if not ok then
-        lastError = "could not open the log file: " .. tostring(err)
+    local ok, res = pcall(Process.new, "notepad.exe", log)
+    if ok and res then
+        table.insert(activeProcesses, res)
+    else
+        lastError = "could not open the log file: " .. tostring(res)
     end
     return ok
 end
+
 
 -- ── return the last N lines of the log (for the in-GUI preview) ──
 
@@ -954,7 +1014,8 @@ function gui()
             openLog()
         end
         ofs.Tooltip(
-            "Opens funscript_gen.stderr.log in Notepad - the full log (traceback on error, full pipeline log on success). The line below is ONLY the LAST canonical status line (ERROR: ... or PASSED: ...).")
+            "Opens funscript_gen.stderr.log in Notepad - the full log (traceback on error, full pipeline log on success).\n" ..
+            "The line below is ONLY the LAST canonical status line (ERROR: ... or PASSED: ...).")
         -- show ONLY the final status line (the canonical "ERROR: ..." /
         -- "PASSED: ..." line that funscript_gen.py writes as the LAST
         -- line of the log) - not the whole 15-line tail.  The full
@@ -972,42 +1033,46 @@ function gui()
     if ofs.CollapsingHeader("Generator", true) then
     -- parameters
     prevTrackerIdx = trackerIdx
-    trackerIdx, c = ofs.Combo("Tracker", trackerIdx,
-        { "yolo - pose (default)",
-            "mediapipe - pose (33 landmarks)",
-            "sot-csrt - OpenCV single-object tracker (ROI)",
-            "sot-kcf - OpenCV single-object tracker (ROI)",
-            "sot-vit - OpenCV ViT tracker (ROI)",
-            "sot-mil - OpenCV MIL tracker (ROI)",
-            "groundingdino - text-prompt boxes",
-            "ostrack - ViT one-stream, max accuracy (ONNX)",
-            "gsam2 - Grounded SAM 2, pixel-mask silhouette (max accuracy)",
-            "ollama - LLM: draw a ROI, the model reads all sampled frames (slow, for hard clips)" })
+    trackerIdx, c = ofs.Combo("Tracker", trackerIdx, TRACKERS)
     if c then anyChanged = true end
     -- (tooltip below)
     ofs.Tooltip(
-        "yolo / mediapipe: multi-person pose - the Identify window picks active/passive partners. SOT (csrt / kcf / vit / mil): single object - draw an ROI box around the exact body zone (Enter to start, R in the preview to re-select when lost); robust, but only ONE person can be tracked. groundingdino: text-prompt open-vocabulary detection. ostrack: OSTrack - the most accurate single-object tracker, ONNX weights. sot-vit: OpenCV TrackerVit. gsam2: Grounded SAM 2 (pixel-mask silhouette). ollama: LLM (VLM) reads sampled frames of a single ROI region and outputs a depth-per-frame JSON track — slow, but best for 'hard' segments; requires a running `ollama serve` with a MULTIMODAL model, plus one extra interactive window on start to draw the ROI.")
-    if trackerIdx == 1 then
+        "SOT (csrt / kcf / vit / mil): single object - draw an ROI box around the tracked target body zone\n" ..
+        "and optionally ROI of static zone for compensate camera movement.\n" ..
+        "ostrack: OSTrack - single-object tracker, ONNX weights.\n" ..
+        "yolo / mediapipe: multi-person pose - the Identify window picks active/passive partners.\n" ..
+        "groundingdino: text-prompt open-vocabulary detection.\n" ..
+        "gsam2: Grounded SAM 2 (pixel-mask silhouette).\n" ..
+        "ollama: LLM (VLM) reads sampled frames of a single ROI region and outputs\n" ..
+        "a depth-per-frame JSON track - slow, but best for 'hard' segments;\n" ..
+        "requires a running `ollama serve` with a MULTIMODAL model,\n" ..
+        "plus one extra interactive window on start to draw the ROI.")
+    if trackerIdx == TRACKER_YOLO then
         yoloModelIdx, c = ofs.Combo("YOLO model", yoloModelIdx,
             { "yolov8n-pose", "yolov8s-pose", "yolov8m-pose", "yolov8l-pose", "yolov8x-pose",
                 "yolo11n-pose", "yolo11s-pose", "yolo11m-pose", "yolo11l-pose", "yolo11x-pose",
                 "yolo26n-pose", "yolo26s-pose", "yolo26m-pose", "yolo26l-pose", "yolo26x-pose" })
         if c then anyChanged = true end
         ofs.Tooltip(
-            "default: yolo26x-pose (latest family: end-to-end NMS-free detection). n=fast/rough ... x=max. The model downloads automatically on first run. YOLO input size is 1280 (accurate on 1080p).")
+            "default: yolo26x-pose (latest family: end-to-end NMS-free detection).\n" ..
+            "n=fast/rough ... x=max. The model downloads automatically on first run.\n" ..
+            "YOLO input size is 1280 (accurate on 1080p).")
     end
-    if trackerIdx == 7 then
+    if trackerIdx == TRACKER_GROUNDINGDINO then
         dinoModelIdx, c = ofs.Combo("DINO model", dinoModelIdx,
             { "Swin-B (flagship, 56.7 AP) - default",
                 "Swin-T (lighter, 48.4 AP)" })
         if c then anyChanged = true end
         ofs.Tooltip(
-            "GroundingDINO checkpoint. Swin-B (default) is the most accurate build (trained additionally on RefCOCO / OpenImages); Swin-T is lighter and faster and works the same way. Weights download automatically on first run (Swin-B is ~895 MB).")
+            "GroundingDINO checkpoint.\n" ..
+            "Swin-B (default) is the most accurate build (trained additionally on RefCOCO / OpenImages);\n" ..
+            "Swin-T is lighter and faster and works the same way.\n" ..
+            "Weights download automatically on first run (Swin-B is ~895 MB).")
         -- DINO target list is queried from Python (--list dino = the
         -- DINO_TARGETS in core/detectors/groundingdino.py, the single
         -- source of truth) and CACHED (ensureDinoTargets): no python
         -- process per draw frame.
-        if prevTrackerIdx ~= 7 then
+        if prevTrackerIdx ~= TRACKER_GROUNDINGDINO or not lastDinoScan then
             ensureDinoTargets(ofs.ExtensionDir(), pythonCmd)
         end
         if (dinoTargetIdx or 1) > #dinoTargets then
@@ -1016,20 +1081,26 @@ function gui()
         dinoTargetIdx, c = ofs.Combo("GroundingDINO target", dinoTargetIdx, dinoTargets)
         if c then anyChanged = true end
         ofs.Tooltip(
-            "The detection target (a named text prompt) - INDEPENDENT of the pose-tracker 'point' list. Chosen here from the list provided by core/detectors/groundingdino.py (the single source of truth). Point p (where inside the detected box) is then chosen interactively in the ROI window - default = box center; press+hold LMB inside the active box to move it, release to fix. The prompt is the same color as the person boxes in that window.")
+            "The detection target (a named text prompt) - INDEPENDENT of the pose-tracker 'point' list.\n" ..
+            "Chosen here from the list provided by core/detectors/groundingdino.py (the single source of truth).\n" ..
+            "Point p (where inside the detected box) is then chosen interactively in the ROI window - default = box center;\n" ..
+            "press+hold LMB inside the active box to move it, release to fix.\n" ..
+            "The prompt is the same color as the person boxes in that window.")
         dinoCustomPrompt, c = ofs.Input("Custom GroundingDINO prompt", dinoCustomPrompt)
         if c then anyChanged = true end
         ofs.Tooltip(
-            "OPTIONAL: when non-empty, REPLACES the selected target's built-in phrase with an exact custom text prompt (e.g. 'the waistband line of a pair of shorts'). Leave empty to use the named target's prompt. Applies to groundingdino only.")
+            "OPTIONAL: when non-empty, REPLACES the selected target's built-in phrase with\n" ..
+            "an exact custom text prompt (e.g. 'the waistband line of a pair of shorts').\n" ..
+            "Leave empty to use the named target's prompt. Applies to groundingdino only.")
     end
     -- ── OSTrack ONNX picker - visible ONLY for the 'ostrack' tracker ─
     -- (mirrors the YOLO/DINO combos: the model list is shown only when the
     -- selected tracker consumes that folder).  List is CACHED
     -- (ensureFamilyModels "ostrack"): no `dir /b` on idle frames.  Re-scan
     -- fires only when a cached file disappears, or unconditionally at
-    -- launch (see startGeneration).
-    if trackerIdx == 8 then
-        if prevTrackerIdx ~= 8 then
+    -- launch (lastOstrackScan is nil, same pattern as ensureSam2Models).
+    if trackerIdx == TRACKER_OSTRACK then
+        if prevTrackerIdx ~= TRACKER_OSTRACK or not lastOstrackScan then
             ensureFamilyModels(ofs.ExtensionDir(), "ostrack")
         end
         if (ostrackModelIdx or 1) > #ostrackModels + 1 then
@@ -1048,18 +1119,15 @@ function gui()
         ostrackModelIdx, c = ofs.Combo("OSTrack model (onnx)", ostrackModelIdx, ostrackOpts)
         if c then anyChanged = true end
         ofs.Tooltip(
-            "OSTrack - ONNX weights for the InferenceSession " ..
-            "(template + search inputs, score/size/offset outputs).\n" ..
+            "OSTrack - ONNX weights for the InferenceSession (template + search inputs, score/size/offset outputs).\n" ..
             "  * 'auto' = the first .onnx in models/ostrack/.\n" ..
-            "  * any file listed = used as-is (cv2 TracerVit-style params are " ..
-            "not involved).\n" ..
-            "  * 'folder is empty' = put a *.onnx file into models/ostrack/ " ..
-            "(no official ONNX release: botaoye/OSTrack exports + the " ..
-            "l-sf/Track-trt recipe).")
+            "  * any file listed = used as-is (cv2 TracerVit-style params are not involved).\n" ..
+            "  * 'folder is empty' = put a *.onnx file into models/ostrack/\n" ..
+            "(no official ONNX release: botaoye/OSTrack exports + the l-sf/Track-trt recipe).")
     end
     -- ── sot-vit ONNX picker - visible ONLY for the 'sot-vit' tracker ─
-    if trackerIdx == 5 then
-        if prevTrackerIdx ~= 5 then
+    if trackerIdx == TRACKER_SOT_VIT then
+        if prevTrackerIdx ~= TRACKER_SOT_VIT or not lastVitScan then
             ensureFamilyModels(ofs.ExtensionDir(), "vittrack")
         end
         if (vitModelIdx or 1) > #vitModels + 1 then
@@ -1078,27 +1146,22 @@ function gui()
         vitModelIdx, c = ofs.Combo("sot-vit model (onnx)", vitModelIdx, vitOpts)
         if c then anyChanged = true end
         ofs.Tooltip(
-            "sot-vit (OpenCV TrackerVit) - TrackerVit ONNX weights " ..
-            "(applied via cv2.TrackerVit_Params().net).\n" ..
-            "  * 'auto' = auto-download of vitTracker.onnx into " ..
-            "models/vittrack/ then the CWD (legacy behaviour).\n" ..
+            "sot-vit (OpenCV TrackerVit) - TrackerVit ONNX weights (applied via cv2.TrackerVit_Params().net).\n" ..
+            "  * 'auto' = auto-download of vitTracker.onnx into models/vittrack/ then the CWD (legacy behaviour).\n" ..
             "  * any file listed = used as-is.\n" ..
-            "  * 'folder is empty' = the auto-download will fetch " ..
-            "vitTracker.onnx on the first run, or drop a .onnx file into " ..
-            "models/vittrack/.")
+            "  * 'folder is empty' = the auto-download will fetch vitTracker.onnx on the first run,\n" ..
+            "or drop a .onnx file into models/vittrack/.")
     end
-    local isSotTracker = (trackerIdx >= 3 and trackerIdx <= 6)
-        or trackerIdx == 8 -- ostrack
-        or trackerIdx == 9 -- gsam2 (Grounded SAM2)
-    local isDinoTracker = (trackerIdx == 7)
-    local isLlmTracker = (trackerIdx == 10) -- ollama - LLM mode (no "point" combo)
-    -- ── Grounded SAM 2 (gsam2) checkpoint + point-p axis - ONLY for idx 9 ──
-    if trackerIdx == 9 then
+    local isSotTracker = (SOT_FAMILY[trackerIdx] == true)
+    local isDinoTracker = (trackerIdx == TRACKER_GROUNDINGDINO)
+    local isLlmTracker = (trackerIdx == TRACKER_OLLAMA) -- LLM mode (no "point" combo)
+    -- ── Grounded SAM 2 (gsam2) checkpoint + point-p axis - ONLY for TRACKER_GSAM2 ──
+    if trackerIdx == TRACKER_GSAM2 then
         -- checkpoint list from Python (--list sam2, the single source of
         -- truth = core/detectors/models.py SAM2_VARIANTS, default FIRST).
         -- LAZY + CACHED (ensureSam2Models): no python process on idle
         -- draw frames (same pattern as ensureDinoTargets / ensureFamilyModels).
-        if prevTrackerIdx ~= 9 then
+        if prevTrackerIdx ~= TRACKER_GSAM2 or not lastSam2Scan then
             ensureSam2Models(ofs.ExtensionDir(), pythonCmd)
         end
         if (sam2ModelIdx or 1) > #sam2Models then
@@ -1106,50 +1169,50 @@ function gui()
         end
         sam2ModelIdx, c = ofs.Combo("SAM2 model", sam2ModelIdx, sam2Models)
         if c then anyChanged = true end
-        ofs.Tooltip("Grounded SAM 2 checkpoint (facebookresearch/sam2). " ..
-            "sam2.1-hiera-base-plus is the default (best accuracy/size balance). " ..
-            "sam2.1-hiera-large = max accuracy (~8 GB VRAM, fits the RTX 5090). " ..
-            "sam2.1-hiera-tiny = fastest / smallest. Weights auto-download into " ..
+        ofs.Tooltip("Grounded SAM 2 checkpoint (facebookresearch/sam2).\n" ..
+            "sam2.1-hiera-base-plus is the default (best accuracy/size balance).\n" ..
+            "sam2.1-hiera-large = max accuracy (~8 GB VRAM, fits the RTX 5090).\n" ..
+            "sam2.1-hiera-tiny = fastest / smallest. Weights auto-download into\n" ..
             "models/sam2/ on first run (see core/detectors/models.py SAM2_VARIANTS).")
         sam2AxisIdx, c = ofs.Combo("SAM2 point axis (p)", sam2AxisIdx,
             { "center of mass (cos) - default, rotation-invariant",
                 "center of mass (principal) - same signal, debug knob",
                 "bounding-box center (bbox) - box-tracker style" })
         if c then anyChanged = true end
-        ofs.Tooltip("How the tracked point p is derived from the silhouette mask. " ..
-            "cos / principal = subpixel CENTER OF MASS - the rotation-invariant " ..
-            "point (recommended; a changing camera angle does not shift it). " ..
-            "bbox = the mask's bounding-box center (same rule as the other SOT " ..
+        ofs.Tooltip("How the tracked point p is derived from the silhouette mask.\n" ..
+            "cos / principal = subpixel CENTER OF MASS - the rotation-invariant\n" ..
+            "point (recommended; a changing camera angle does not shift it).\n" ..
+            "bbox = the mask's bounding-box center (same rule as the other SOT\n" ..
             "trackers; a debug knob).")
         sam2FramesIdx, c = ofs.Combo("SAM2 frames backend", sam2FramesIdx,
             { "lazy - per-frame decord decode (constant RAM, RECOMMENDED)",
                 "jpeg - pre-export + async loader (RAM grows with clip)" })
         if c then anyChanged = true end
-        ofs.Tooltip("How SAM 2 receives video frames. " ..
-            "'lazy' (default) decodes each frame ON DEMAND via decord, so RAM " ..
-            "stays constant (a few frames) regardless of clip length - this " ..
-            "removes the upfront whole-clip RAM spike (a ~2 min 1080p clip " ..
-            "is ~47 GB, a 5-min video ~95 GB) that sits between start and the " ..
-            "first mask. 'jpeg' pre-exports the whole video to a JPEG folder " ..
-            "and lets SAM 2's built-in async loader stream from it - faster " ..
-            "decode for some codecs, but RAM still grows with clip length " ..
+        ofs.Tooltip("How SAM 2 receives video frames.\n" ..
+            "'lazy' (default) decodes each frame ON DEMAND via decord, so RAM\n" ..
+            "stays constant (a few frames) regardless of clip length - this\n" ..
+            "removes the upfront whole-clip RAM spike (a ~2 min 1080p clip\n" ..
+            "is ~47 GB, a 5-min video ~95 GB) that sits between start and the\n" ..
+            "first mask. 'jpeg' pre-exports the whole video to a JPEG folder\n" ..
+            "and lets SAM 2's built-in async loader stream from it - faster\n" ..
+            "decode for some codecs, but RAM still grows with clip length\n" ..
             "(useful as a comparison baseline).")
         sam2Ema, c = ofs.Input("SAM2 EMA (0.0-1.0)", sam2Ema)
         if c then anyChanged = true end
-        ofs.Tooltip("EMA blend factor over the raw SAM 2 logit map, applied " ..
-            "BEFORE the >0 binarisation. Dampens the per-frame " ..
-            "silhouette-boundary 'breathing' that shows up as a 10-30 px " ..
-            "centroid oscillation around the ROI center (visible in " ..
-            "funscript_gen.stderr.log as score:1.0 on every frame). " ..
-            "1.000 = OFF (legacy, sharpest tracking). 0.500 (default) " ..
-            "halves the weight of any single noisy frame. " ..
-            "0.700-0.800 = smoother but slightly lagged. " ..
-            "0.200 = sharper tracking than default. " ..
-            "The reference peak used by the loss score is calibrated on " ..
-                "the FIRST accepted frame after init() - it is independent of " ..
-                "this knob.")
+        ofs.Tooltip("EMA blend factor over the raw SAM 2 logit map, applied\n" ..
+            "BEFORE the >0 binarisation. Dampens the per-frame\n" ..
+            "silhouette-boundary 'breathing' that shows up as a 10-30 px\n" ..
+            "centroid oscillation around the ROI center (visible in\n" ..
+            "funscript_gen.stderr.log as score:1.0 on every frame).\n" ..
+            "1.000 = OFF (legacy, sharpest tracking). 0.500 (default)\n" ..
+            "halves the weight of any single noisy frame.\n" ..
+            "0.700-0.800 = smoother but slightly lagged.\n" ..
+            "0.200 = sharper tracking than default.\n" ..
+            "The reference peak used by the loss score is calibrated on\n" ..
+            "the FIRST accepted frame after init() - it is independent of\n" ..
+            "this knob.")
         end
-        -- ── LLM (Ollama) generation mode - ONLY for idx 10 ──
+        -- ── LLM (Ollama) generation mode - ONLY for TRACKER_OLLAMA ──
         -- One single fixed ROI on ONE frame of the video.  Every sampled frame
         -- of the selected span is cropped by that ROI, thumbnail'd and base64
         -- encoded, then sent in ONE multimodal `generate()` call to the
@@ -1165,7 +1228,7 @@ function gui()
             -- ensureDinoTargets.  The list comes from `ollama list` (a running
             -- `ollama serve` is required; the Python client raises a clean
             -- error and the CLI will show the user-friendly message).
-            if prevTrackerIdx ~= 10 then
+            if prevTrackerIdx ~= TRACKER_OLLAMA or not lastOllamaScan then
                 ensureOllamaModels(ofs.ExtensionDir(), pythonCmd)
             end
             if (ollamaModelIdx or 1) > #ollamaModels then
@@ -1174,79 +1237,79 @@ function gui()
             ollamaModelIdx, c = ofs.Combo("Ollama model", ollamaModelIdx, ollamaModels)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "The Ollama model to run for the LLM (VLM) generation mode. " ..
-                "This MUST be a MULTIMODAL (vision-capable) model that can see " ..
-                "images - a plain text LLM will not follow the JSON-in-the-prompt " ..
-                "instruction.  List comes from `ollama list`; a running `ollama " ..
-                "serve` is required.  The model name (with any tag, e.g. " ..
-                "my-model:32b) is forwarded to the CLI as `--ollama-model`.  " ..
-                "Defaults are 128k context / 32k response / 2k batch / 1920px " ..
+                "The Ollama model to run for the LLM (VLM) generation mode.\n" ..
+                "This MUST be a MULTIMODAL (vision-capable) model that can see\n" ..
+                "images - a plain text LLM will not follow the JSON-in-the-prompt\n" ..
+                "instruction.  List comes from `ollama list`; a running `ollama\n" ..
+                "serve` is required.  The model name (with any tag, e.g.\n" ..
+                "my-model:32b) is forwarded to the CLI as `--ollama-model`.\n" ..
+                "Defaults are 128k context / 32k response / 2k batch / 1920px\n" ..
                 "thumbnail / 0.5s clip spacing - the knobs below expose each.")
             -- clip duration (seconds per sampled image).  Lower = finer
             -- temporal resolution; higher = longer spans fit in one request.
             llmClipS, c = ofs.Input("LLM clip duration (s per image)", llmClipS)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "How many seconds of video = ONE sampled image sent to the LLM. " ..
-                "Default 0.5 (one image every 0.5 s → a 30 s clip = 60 images). " ..
-                "Bigger clip = fewer images (faster, less VRAM); smaller clip = " ..
-                "finer temporal resolution (slower, more detail).  The MAXIMUM " ..
-                "is the MAX_IMAGES_PER_CALL=64 cap in core/postpass/llm_gen.py - " ..
-                "any span that exceeds 64 samples with the current clip_s is " ..
-                "TRUNCATED to the first 64 (a warning is logged).  For a 2 min " ..
+                "How many seconds of video = ONE sampled image sent to the LLM.\n" ..
+                "Default 0.5 (one image every 0.5 s -> a 30 s clip = 60 images).\n" ..
+                "Bigger clip = fewer images (faster, less VRAM); smaller clip =\n" ..
+                "finer temporal resolution (slower, more detail).  The MAXIMUM\n" ..
+                "is the MAX_IMAGES_PER_CALL=64 cap in core/postpass/llm_gen.py -\n" ..
+                "any span that exceeds 64 samples with the current clip_s is\n" ..
+                "TRUNCATED to the first 64 (a warning is logged).  For a 2 min\n" ..
                 "clip use ~2.0 s per image to stay under the cap.")
             -- stop time (optional; empty = end of video)
             llmStop, c = ofs.Input("LLM stop time (MM:SS, empty = end of video)", llmStop)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "Optional: end of the LLM analysis span (MM:SS in ABSOLUTE " ..
-                "video time, the same format as the start time).  When empty, " ..
-                "the span runs from the [start] value to the end of the video. " ..
-                "Only the frames in [start .. stop] are sampled and sent to the " ..
-                "LLM - use this to limit generation to a 'hard' segment that " ..
+                "Optional: end of the LLM analysis span (MM:SS in ABSOLUTE\n" ..
+                "video time, the same format as the start time).  When empty,\n" ..
+                "the span runs from the [start] value to the end of the video.\n" ..
+                "Only the frames in [start .. stop] are sampled and sent to the\n" ..
+                "LLM - use this to limit generation to a 'hard' segment that\n" ..
                 "the tracker missed.")
             -- Ollama `generate()` options (the three knobs the reference
             -- implementation exposed; see plans/llm-ollama-generation.md)
             llmNumCtx, c = ofs.Input("Ollama num_ctx (context budget)", llmNumCtx)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "Ollama explicit context budget in TOKENS (default 200000). " ..
-                "A 1920x1920 JPEG image occupies ~1500-2500 tokens depending on " ..
-                "the model, so 128k ctx holds ~50-80 images + the prompt + the " ..
-                "response.  Bigger costs VRAM; smaller is faster.  On an RTX " ..
+                "Ollama explicit context budget in TOKENS (default 200000).\n" ..
+                "A 1920x1920 JPEG image occupies ~1500-2500 tokens depending on\n" ..
+                "the model, so 128k ctx holds ~50-80 images + the prompt + the\n" ..
+                "response.  Bigger costs VRAM; smaller is faster.  On an RTX\n" ..
                 "5090 (32 GB) any value up to 256k usually fits.")
             llmNumPredict, c = ofs.Input("Ollama num_predict (max response)", llmNumPredict)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "Ollama max response length in TOKENS (default 32000).  The " ..
-                "model may emit a 'thinking' passage before the JSON array; " ..
-                "this caps the total.  Must be larger than the JSON array " ..
-                "itself (at ~50 chars per entry * 64 images ≈ 4k tokens, so " ..
+                "Ollama max response length in TOKENS (default 32000).  The\n" ..
+                "model may emit a 'thinking' passage before the JSON array;\n" ..
+                "this caps the total.  Must be larger than the JSON array\n" ..
+                "itself (at ~50 chars per entry * 64 images ≈ 4k tokens, so\n" ..
                 "32k is a comfortable headroom).")
             llmNumBatch, c = ofs.Input("Ollama num_batch (prompt batch)", llmNumBatch)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "Ollama prompt-processing batch size (default 2048).  Larger " ..
-                "values speed up the initial image-encoding pass on a GPU " ..
-                "(a 64-image batch at 2048 is ~30 s on RTX 5090; at 512 it " ..
+                "Ollama prompt-processing batch size (default 2048).  Larger\n" ..
+                "values speed up the initial image-encoding pass on a GPU\n" ..
+                "(a 64-image batch at 2048 is ~30 s on RTX 5090; at 512 it\n" ..
                 "is ~100 s).  Smaller values cap VRAM.")
             llmThumb, c = ofs.Input("Thumbnail max side (px)", llmThumb)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "Maximum side in pixels of each cropped image BEFORE encoding " ..
-                "(1920 default, aspect preserved, downscale-only).  Smaller = " ..
-                "smaller base64 payload + faster encoding + fits more in " ..
-                "context; too small (e.g. <200) loses the detail the VLM needs " ..
-                "to judge depth.  Use 1920-640 for most clips; the 1920 default " ..
+                "Maximum side in pixels of each cropped image BEFORE encoding\n" ..
+                "(1920 default, aspect preserved, downscale-only).  Smaller =\n" ..
+                "smaller base64 payload + faster encoding + fits more in\n" ..
+                "context; too small (e.g. <200) loses the detail the VLM needs\n" ..
+                "to judge depth.  Use 1920-640 for most clips; the 1920 default\n" ..
                 "is the same as the reference implementation.")
             -- optional prompt override (default is in core.config.LLM_DEFAULT_PROMPT)
             llmPrompt, c = ofs.Input("Custom LLM prompt (empty = default)", llmPrompt)
             if c then anyChanged = true end
             ofs.Tooltip(
-                "OPTIONAL: when non-empty, REPLACES the default depth-of-" ..
-                "penetration prompt with this exact string.  The prompt MUST " ..
-                "demand the strict JSON shape [{\"frame\": N, \"depth_pct\": X}, " ..
-                "...] for the parser to work.  Leave empty to use the built-in " ..
+                "OPTIONAL: when non-empty, REPLACES the default depth-of-penetration" ..
+                "prompt with this exact string.  The prompt MUST\n" ..
+                "demand the strict JSON shape [{\"frame\": N, \"depth_pct\": X},\n" ..
+                "...] for the parser to work.  Leave empty to use the built-in\n" ..
                 "default (see core/config.py LLM_DEFAULT_PROMPT).")
         end
         if not isSotTracker and not isDinoTracker and not isLlmTracker then
@@ -1261,7 +1324,12 @@ function gui()
                 "ankle (midpoint of both ankles)" })
         if c then anyChanged = true end
         ofs.Tooltip(
-            "Which body zone is tracked as the point p. mid-hips / left-hip / right-hip cover the pelvis zone - pick the single side that gives the most stable movement. Recalibrate f/b after changing it. Hold S in any window to see the skeleton and exactly where p is. (Hidden for SOT trackers - they track the CENTER of the ROI you draw. Hidden for GroundingDINO - its target list is separate ('GroundingDINO target' above) and point p is picked interactively in the ROI window.)")
+            "Which body zone is tracked as the point p. mid-hips / left-hip / right-hip\n" ..
+            "cover the pelvis zone - pick the single side that gives the most stable movement.\n" ..
+            "Recalibrate f/b after changing it. Hold S in any window to see the skeleton and exactly where p is.\n" ..
+            "(Hidden for SOT trackers - they track the CENTER of the ROI you draw.\n" ..
+            "Hidden for GroundingDINO - its target list is separate ('GroundingDINO target' above)\n" ..
+            "and point p is picked interactively in the ROI window.)")
     end
     flowIdx, c = ofs.Combo("Point smoothing (anti-jitter)", flowIdx,
         { "off - pose point as-is (default)",
@@ -1269,20 +1337,28 @@ function gui()
             "fusion - pose anchor + flow particles" })
     if c then anyChanged = true end
     ofs.Tooltip(
-        "Optical-flow refinement of the tracked point p (reduces jitter when the pose model jumps). In the preview: green dot = final point, red ring = raw pose anchor (only when they differ). 'fusion' is recommended if the point skips around; 'pure' may drift on textureless areas.")
+        "Optical-flow refinement of the tracked point p (reduces jitter when the pose model jumps).\n" ..
+        "In the preview: green dot = final point, red ring = raw pose anchor (only when they differ).\n" ..
+        "'fusion' is recommended if the point skips around; 'pure' may drift on textureless areas.")
     useCalibrate, c = ofs.Checkbox("Calibrate f/b manually (interactive window)", useCalibrate)
     if c then anyChanged = true end
     ofs.Tooltip(
-        "On: interactive window - mark f (full-in, 0%) and b (full-out, 100%) on a frame of the active partner; these points define the thrust axis. Off: the f/b axis is derived automatically from the spread of point p over the first ~6 seconds (rougher).")
+        "On: interactive window - mark f (full-in, 0%) and b (full-out, 100%) on a frame of the active partner;\n" ..
+        "these points define the thrust axis. Off: the f/b axis is derived automatically from the spread of\n" ..
+        "point p over the first ~6 seconds (rougher).")
     autoPartners, c = ofs.Checkbox("Auto partners (skip the selection window)", autoPartners)
     if c then anyChanged = true end
     ofs.Tooltip(
-        "If enabled - the most confident detected person becomes the active partner, the second one the passive (no Identify window).")
+        "If enabled - the most confident detected person becomes the active partner,\n" ..
+        "the second one the passive (no Identify window).")
     if isSotTracker then
         noSceneRoi, c = ofs.Checkbox("SOT: skip the scene ROI setup (full frame as-is)", noSceneRoi)
         if c then anyChanged = true end
         ofs.Tooltip(
-            "ON - the scene setup window (zoom 1x/2x/3x, rotate 15deg steps, pan 10px, optional scene-ROI crop) is SKIPPED: the video runs on the full frame with identity transform (fastest path, no extra transformation). OFF (default) - the scene setup window opens BEFORE the ROI-drag window; whatever transform you pick is applied to every frame the tracker sees.")
+            "ON - the scene setup window (zoom 1x/2x/3x, rotate 15deg steps, pan 10px, optional scene-ROI crop)\n" ..
+            "is SKIPPED: the video runs on the full frame with identity transform (fastest path, no extra transformation).\n" ..
+            "OFF (default) - the scene setup window opens BEFORE the ROI-drag window;\n" ..
+            "whatever transform you pick is applied to every frame the tracker sees.")
     end
     useVlm, c = ofs.Checkbox("VLM scene analysis (Ollama)", useVlm)
     if c then anyChanged = true end
@@ -1294,19 +1370,23 @@ function gui()
     ofs.Separator()
     ofs.Text("How to interpret the motion")
     motionIdx, c = ofs.Combo("Motion mode", motionIdx,
-        { "straight (linear projection onto the f→b axis)",
+        { "straight (linear projection onto the f->b axis)",
             "arc (fitted arc, progress along the arc)",
             "parabola (fitted parabola, progress along it)",
             "complex (real trajectory of point p, raw path)" })
     if c then anyChanged = true end
     ofs.Tooltip(
-        "straight - projection onto the axis; arc/parabola - curve fit, progress measured by arc length; complex - the actual per-frame path length of point p (recommended for real video).")
+        "straight - projection onto the axis\n" ..
+        "arc/parabola - curve fit, progress measured by arc length\n" ..
+        "complex - the actual per-frame path length of point p (recommended)")
     normalizeIdx, c = ofs.Combo("Normalize", normalizeIdx,
         { "per-stroke: each stroke = 100%",
             "global-max: normalize against the largest stroke of the session" })
     if c then anyChanged = true end
     ofs.Tooltip(
-        "per-stroke: every f→b / b→f stroke goes 0→100 independently. global-max: the longest stroke of the whole generation = 100%, the others are scaled proportionally.")
+        "per-stroke: every f->b / b->f stroke goes 0->100 independently.\n" ..
+        "global-max: the longest stroke of the whole generation = 100%,\n" ..
+        "the others are scaled proportionally.")
 
     ofs.Separator()
     pythonCmd, c = ofs.Input("Python cmd", pythonCmd)
@@ -1318,7 +1398,9 @@ function gui()
     end
     ofs.EndDisabled()
     ofs.Tooltip(
-        "Generate from the current player position to the end of the video. Stop: q/space in the preview window (saves the processed part).")
+        "Generate from the current player position to\n" ..
+        "the end of the video or to the next point if exist\n" ..
+        "Stop: q/space in the preview window (saves the processed part).")
 
     if procHandle then
         ofs.Separator()

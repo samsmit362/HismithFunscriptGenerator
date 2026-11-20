@@ -164,12 +164,30 @@ if _missing:
 # startup marker: the very first line that can appear in the stderr log
 # (if OFS reports an error but the log is empty - this line is missing,
 # which means the crash happened inside the imports themselves).  Written
-# via log() so it lands in the log FILE (the reliable channel) as well as
-# the stdout/stderr pipes - this keeps the log non-empty on a successful
-# import too, so "Open stderr log" always shows something useful.
+# to the log FILE (the reliable channel) plus the stdout/stderr pipes -
+# this keeps the log non-empty on a successful import too, so "Open
+# stderr log" always shows something useful.
+#
+# EXCEPTION: the `--list` path is MACHINE-READABLE (main.lua's
+# ensureDinoTargets / ensureOllamaModels / ensureSam2Models read the
+# stdout of `--list dino` / `--list ollama` / `--list sam2` via
+# io.popen and treat EVERY line as a combo entry).  Writing the boot
+# line to stdout there would make it the FIRST entry of the combo
+# (a stray "[boot] funscript_gen.py imported ok ..." line).  So in
+# --list mode the boot line goes to the log FILE + stderr only -
+# never to stdout - keeping the list output pure for any consumer.
 try:
-    log("[boot] funscript_gen.py imported ok | "
-          f"python={sys.version.split()[0]} cv2={cv2.__version__} numpy={_np.__version__}")
+    _boot = ("[boot] funscript_gen.py imported ok | "
+             f"python={sys.version.split()[0]} "
+             f"cv2={cv2.__version__} numpy={_np.__version__}")
+    if "--list" in sys.argv:
+        log_file(_boot)
+        try:
+            print(_boot, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    else:
+        log(_boot)
 except Exception:
     pass
 

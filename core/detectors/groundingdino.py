@@ -51,29 +51,28 @@ from core.logging import log
 # GroundingDINO tokenizer syntax that helps the model strictly separate
 # class boundaries from the background
 DINO_TARGETS = {
-    "guy": "guy .",
-    "girl": "girl .",
-    "pelvis": "pelvis .",
-    "butt": "butt .",
-    "ass": "ass .",
-    "crotch": "crotch .",
-    "hip": "hip .",
-    "thigh": "thigh .",
-    "torso": "torso .",
-    "head": "head .",
-    "head": "head .",
-    "left-hip": "the left outer hip curve of a body",
-    "right-hip": "the right outer hip curve of a body",
-    "thigh": "the visible upper thigh silhouette",
-    "torso": "the side torso profile line of a person",
-    "shoulders": "the shoulder line of a person",
-    "head": "the outline of a person's head and hair",
-    "ankle": "the visible ankle and lower shin of a person",
+    "guy butt .": "guy butt .",
+    "guy .": "guy .",
+    "girl .": "girl .",
+    "guy ass .": "guy ass .",
+    "guy pelvis .": "guy pelvis .",
+    "guy crotch .": "guy crotch .",
+    "guy hip .": "guy hip .",
+    "guy thigh .": "guy thigh .",
+    "guy torso .": "guy torso .",
+    "guy head .": "guy head .",
+    "guy left-hip": "the left outer hip curve of a guy body .",
+    "guy right-hip": "the right outer hip curve of a guy body .",
+    "guy thigh": "the visible upper thigh silhouette of a guy body .",
+    "guy torso": "the side torso profile line of a of a guy body .",
+    "guy shoulders": "the shoulder line of a of a guy body .",
+    "guy head": "the outline of a guy head and hair .",
+    "guy ankle": "the visible ankle and lower shin of a guy .",
 }
 
 #: default DINO target (also used as the CLI --dino-target default and
 #: the FIRST entry printed by `--list dino`, so GUI combo index 1 = it).
-DEFAULT_DINO_TARGET = "pelvis"
+DEFAULT_DINO_TARGET = "guy butt ."
 
 #: back-compat alias (older imports / _smoke_refactor.py)
 TARGET_PROMPT = DINO_TARGETS

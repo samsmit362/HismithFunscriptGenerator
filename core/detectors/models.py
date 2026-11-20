@@ -351,59 +351,76 @@ def sam2_weights_path(variant: str = DEFAULT_SAM2_VARIANT) -> str:
 # Storage: the official weights live in models/vittrack/
 # (core.config.MODEL_DIRS["vittrack"]).
 #
-# Strategy in ensure_sot_onnx(algo):
-#   1. already in CWD            -> use it (nothing to do);
-#   2. already in models/vittrack/ -> copy it into the CWD;
-#   3. download into models/vittrack/ -> copy it into the CWD;
-#   4. none worked               -> clear error (csrt/kcf/mil always work).
+# Strategy in ensure_sot_onnx(algo) - ALWAYS resolves to the canonical
+# models/vittrack/ location (never a bare CWD file), and RETURNS the path:
+#   1. already in models/vittrack/ -> use it (nothing to do);
+#   2. otherwise download into models/vittrack/ (first URL that works);
+#   3. none worked               -> clear error (csrt/kcf/mil always work).
+# A CWD copy is made best-effort (legacy no-arg factory compatibility) but
+# is NOT relied upon - the tracker points at the returned path explicitly
+# via cv2.TrackerVit_Params().net, so it works regardless of the CWD.
 _SOT_ONNX = {
     "vit": "vitTracker.onnx",
 }
-# candidate download URLs (best-known OpenCV source paths), tried in order
+# candidate download URLs for the official TrackerVit weights, tried in
+# order.  The model lives in the opencv_zoo repo (and its HuggingFace
+# mirror); it is saved locally under the bare name `vitTracker.onnx`
+# (see _SOT_ONNX) so the rest of the code keeps working unchanged.
+# NOTE: the old raw.githubusercontent.com/opencv{,_contrib}/4.x/... paths
+# are dead (404) - the weights were never committed at those paths.
 _SOT_ONNX_URLS = {
     "vit": [
-        "https://raw.githubusercontent.com/opencv/opencv/4.x/modules/dnn/vitTracker.onnx",
-        "https://raw.githubusercontent.com/opencv/opencv_contrib/4.x/modules/dnn/../../vitTracker.onnx",
-        "https://github.com/opencv/opencv_contrib/raw/4.x/modules/dnn/vitTracker.onnx",
+        "https://github.com/opencv/opencv_zoo/raw/main/models/object_tracking_vittrack/object_tracking_vittrack_2023sep.onnx",
+        "https://huggingface.co/opencv/object_tracking_vittrack/resolve/main/object_tracking_vittrack_2023sep.onnx",
     ],
 }
 
 
-def ensure_sot_onnx(algo: str) -> None:
-    """Make the ONNX weights for `algo` available in the CWD (vit only).
+def ensure_sot_onnx(algo: str) -> str:
+    """Make the ONNX weights for `algo` available in the canonical
+    models/vittrack/ location (vit only) and RETURN the path to them.
     csrt / kcf / mil need no external file (mil trains online) and return
-    immediately."""
+    an empty string.
+
+    The path is ALWAYS under models/vittrack/ (never a bare CWD file), so
+    the tracker can point at it explicitly via cv2.TrackerVit_Params().net
+    regardless of the process CWD.  A CWD copy is made best-effort (legacy
+    no-arg factory compatibility) but is not relied upon."""
     import shutil
     fname = _SOT_ONNX.get(algo)
     if not fname:
-        return  # csrt / kcf / mil: no external weights file
-    cwd = Path.cwd()
-    if (cwd / fname).exists():
-        return
+        return ""  # csrt / kcf / mil: no external weights file
     cached_dir = model_subdir(MODEL_DIRS["vittrack"])
     cached = cached_dir / fname
-    if cached.exists():
-        shutil.copy2(str(cached), str(cwd / fname))
-        return
-    for url in _SOT_ONNX_URLS.get(algo, []):
-        try:
-            print(f"[sot] Downloading {fname} from {url} ...")
-            tmp = cached_dir / f".{fname}.tmp"
-            urllib.request.urlretrieve(url, str(tmp))
-            if tmp.exists() and tmp.stat().st_size > 50 * 1024:
-                tmp.rename(cached)
-                shutil.copy2(str(cached), str(cwd / fname))
-                print(f"[sot] {fname} ready in {cwd}")
-                return
-            # downloaded too small to be a real model - keep trying the rest
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            continue
-    raise FileNotFoundError(
-        f"SOT {algo!r} needs '{fname}' but it could not be fetched "
-        f"automatically. Either place the file into {cached_dir} "
-        f"(or the working directory), or use a self-contained algorithm: "
-        f"--tracker sot-csrt or sot-kcf (sot-mil trains online).")
+    if not cached.exists():
+        for url in _SOT_ONNX_URLS.get(algo, []):
+            try:
+                print(f"[sot] Downloading {fname} from {url} ...")
+                tmp = cached_dir / f".{fname}.tmp"
+                urllib.request.urlretrieve(url, str(tmp))
+                if tmp.exists() and tmp.stat().st_size > 50 * 1024:
+                    tmp.rename(cached)
+                    print(f"[sot] {fname} ready in {cached_dir}")
+                    break
+                # downloaded too small to be a real model - keep trying the rest
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                continue
+    if not cached.exists():
+        raise FileNotFoundError(
+            f"SOT {algo!r} needs '{fname}' but it could not be fetched "
+            f"automatically. Either place the file into {cached_dir}, "
+            f"or use a self-contained algorithm: --tracker sot-csrt or "
+            f"sot-kcf (sot-mil trains online).")
+    # best-effort CWD copy (the legacy no-arg cv2 factory looks for the bare
+    # file in the CWD); a non-writable CWD must not break the tracker.
+    try:
+        cwd = Path.cwd()
+        if not (cwd / fname).exists():
+            shutil.copy2(str(cached), str(cwd / fname))
+    except OSError:
+        pass
+    return str(cached)
 
 
 # ── OSTrack ONNX models ────────────────────────────────────────────────────

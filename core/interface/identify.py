@@ -23,7 +23,8 @@ import cv2
 
 from core.detectors.box import box_center
 from core.detectors.person_tracker import PersonTracker
-from core.interface.preview import PREVIEW_H, PREVIEW_W, draw_skeleton, fit, setup_window
+from core.interface.preview import (PREVIEW_H, PREVIEW_W, draw_skeleton, fit,
+                                    setup_window, tracker_label)
 from core.interface.win32 import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, key_held
 from core.tracking.scene_warp import (ANGLE_STEP_DEG, PAN_CLAMP_PX, PAN_STEP_PX,
                                       SceneTransform, ZOOM_LEVELS)
@@ -195,8 +196,8 @@ def _setup_scene(frame: np.ndarray,
                             scene_roi=prev.scene_roi)
 
     H, W = frame.shape[:2]
-    win = ("SOT scene: +/- zoom  [ ] rotate  arrows pan10px  "
-           "LMB drag=ROI  R reset  Enter=OK  Q=abort")
+    win = (f"SOT scene [{tracker_label(tracker)}]: +/- zoom  [ ] rotate  "
+           f"arrows pan10px  LMB drag=ROI  R reset  Enter=OK  Q=abort")
     setup_window(win)
     drag = _drag_for(win)
     _drag_reset(win)
@@ -340,8 +341,8 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
     # per-frame detect_all(update) calls of tracking_stream, so no
     # coordinate remapping is required downstream.
     frame = tracker.scene.apply(frame) if tracker.scene is not None else frame
-    win = ("SOT: LMB=ROI p (green), Ctrl+LMB=ROI ps (blue)   "
-           "R=clear   Enter=confirm   Q=abort")
+    win = (f"SOT [{tracker_label(tracker)}]: LMB=ROI p (green), "
+           f"Ctrl+LMB=ROI ps (blue)   R=clear   Enter=confirm   Q=abort")
     setup_window(win)
     drag = _drag_for(win)
     _drag_reset(win)
@@ -565,8 +566,9 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
             "--dino-prompt, a lower threshold, or a different --start.")
 
     _DINO_GREEN = (0, 255, 0)
-    win = ("GroundingDINO: LMB inside the active box = move point p "
-           "(release = fix)  R = next frame  Enter = confirm  Q = abort")
+    win = (f"GroundingDINO [{tracker_label(tracker)}]: LMB inside the active "
+           f"box = move point p (release = fix)  R = next frame  "
+           f"Enter = confirm  Q = abort")
     setup_window(win)
     drag = _drag_for(win)
     _drag_reset(win)
@@ -616,7 +618,7 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
             cv2.circle(view, (cx, cy), 8, (0, 255, 0), -1)
             cv2.line(view, (cx - 13, cy), (cx + 13, cy), (0, 0, 0), 2)
             cv2.line(view, (cx, cy - 13), (cx, cy + 13), (0, 0, 0), 2)
-            cv2.putText(view, ptxt, (cx + 16, cy - 10),
+            cv2.putText(view, "p", (cx + 16, cy - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
             cv2.putText(view, f"u={sel_u:.0f}%  v={sel_v:.0f}%",
                         (cx + 16, cy + 8),
@@ -712,8 +714,8 @@ def _identify_persons(video_path: str, start_s: float, fps: float,
             print("[identify] NO PASSIVE DETECTED (auto)")
         return persons[0], passive
 
-    win = ("Hismith Funscript - identify partners "
-           "(UP/DOWN=select, A=active, P=passive, Enter=confirm, Q=abort)")
+    win = (f"Hismith Funscript [{tracker_label(tracker)}] - identify partners "
+           f"(UP/DOWN=select, A=active, P=passive, Enter=confirm, Q=abort)")
     setup_window(win)
     active = passive = None
     sel_idx = 0

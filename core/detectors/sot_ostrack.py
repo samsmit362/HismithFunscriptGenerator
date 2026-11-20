@@ -214,6 +214,23 @@ class OSTrackTracker(PersonTracker):
                                  "OpenVINOExecutionProvider",
                                  "CPUExecutionProvider") if p in avail] \
             or ["CPUExecutionProvider"]
+        # The CUDA EP needs cuDNN (cudnn64_9.dll) and an initialized CUDA
+        # runtime context (cudart). Both live in torch/lib and are set up by
+        # importing torch - onnxruntime alone cannot find them (they are NOT
+        # on the system PATH), so a bare InferenceSession on the CUDA EP
+        # crashes at the first Conv node with "cudnn64_9.dll ... error 2".
+        # Import torch FIRST when CUDA will be used (torch is a hard
+        # dependency per requirements.txt); fall back to CPU if it is missing.
+        if "CUDAExecutionProvider" in providers:
+            try:
+                import torch  # noqa: F401  (adds torch/lib to the DLL search
+                              #  path + initializes the CUDA runtime context)
+            except Exception as e:
+                log(f"[ostrack] could not import torch for the CUDA EP: {e} - "
+                    f"falling back to CPU")
+                providers = [p for p in providers
+                             if p != "CUDAExecutionProvider"] \
+                    or ["CPUExecutionProvider"]
         print(f"[ostrack] loading ONNX: {path}")
         self._session = ort.InferenceSession(path, sess_options=opts,
                                              providers=providers)

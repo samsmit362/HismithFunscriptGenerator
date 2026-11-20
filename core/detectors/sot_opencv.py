@@ -77,8 +77,10 @@ class SotOpenCVTracker(PersonTracker):
         or a full path. When present we construct the
         tracker via  `cv2.TrackerVit_Params(); p.net = path;  TrackerVit_create(p)`
         - this is the documented OpenCV way.  When `onnx_file` is None the
-        auto-download path (`ensure_sot_onnx`) is used, which stores
-        `vitTracker.onnx` in `models/vittrack/` then copies it into the CWD.
+        auto path (`ensure_sot_onnx`) is used: it guarantees the canonical
+        `models/vittrack/vitTracker.onnx` (downloading it on the first run)
+        and returns its path, which the tracker is then built from via
+        `cv2.TrackerVit_Params().net` - independent of the process CWD.
       * sot-mil - `onnx_file` is IGNORED on purpose (cv2 5.x's
         `TrackerMIL_Params` exposes only sampler-parameters, not a `net`
         field, and MIL trains its own classifier online - multiple
@@ -104,10 +106,15 @@ class SotOpenCVTracker(PersonTracker):
         else:
             self._onnx_path = None
             if algo == "vit":
-                # legacy path: ensure_sot_onnx auto-downloads vitTracker.onnx
-                # into the CWD when missing.
+                # auto path: ensure_sot_onnx guarantees the canonical
+                # models/vittrack/vitTracker.onnx (downloading it on the first
+                # run) and returns its path; the tracker is then built from
+                # that path via cv2.TrackerVit_Params().net, so it works
+                # regardless of the process CWD.
                 from core.detectors.models import ensure_sot_onnx
-                ensure_sot_onnx(algo)
+                self._onnx_path = ensure_sot_onnx(algo)
+                if self._onnx_path:
+                    print(f"[sot-vit] auto-resolved ONNX weights: {self._onnx_path}")
             # mil / csrt / kcf: nothing to do - the cv2 factory is called
             # with no parameters (mil trains online; csrt/kcf are built-in).
             if algo == "mil" and onnx_file:

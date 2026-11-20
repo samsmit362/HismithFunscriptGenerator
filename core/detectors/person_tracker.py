@@ -35,6 +35,12 @@ class PersonTracker:
     #: tracker family: "pose" | "dino" | "sot"
     kind: str = "pose"
 
+    #: Registry name of this tracker instance (set by create_tracker):
+    #: "yolo", "sot-csrt", "groundingdino", ...  The preview windows show it
+    #: so the user always sees WHICH tracking method is active.  None for
+    #: manually constructed (non-registry) tracker objects.
+    name: Optional[str] = None
+
     #: Last per-frame RAW detection box as (x, y, w, h) in FRAME pixels
     #: (floats), or None when nothing was detected this frame.  SOT trackers
     #: populate it with the tracker's per-frame response BEFORE the size EMA

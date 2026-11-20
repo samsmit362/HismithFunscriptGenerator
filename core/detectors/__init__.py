@@ -74,9 +74,12 @@ def create_tracker(name: str, target: str = "mid-hips", **kw) -> PersonTracker:
     module_path, cls_attr = _REGISTRY[name]
     cls: Type[PersonTracker] = getattr(importlib.import_module(module_path), cls_attr)
     if name in SOT_ALGOS:
-        return cls(algo=SOT_ALGOS[name], target=target, onnx_file=kw.get("onnx_file"))
-    if name == "ollama":
+        tr = cls(algo=SOT_ALGOS[name], target=target, onnx_file=kw.get("onnx_file"))
+    elif name == "ollama":
         # The LLM mode has NO target: the crop ROI defines the zone.
         # ``model`` is forwarded so the tracker's __init__ can hold it.
-        return cls(target=target, model=kw.get("model", ""), **{k: v for k, v in kw.items() if k != "model"})
-    return cls(target=target, **kw)
+        tr = cls(target=target, model=kw.get("model", ""), **{k: v for k, v in kw.items() if k != "model"})
+    else:
+        tr = cls(target=target, **kw)
+    tr.name = name  # the preview windows show it (see PersonTracker.name)
+    return tr

@@ -12,7 +12,8 @@ import numpy as np
 
 from core.detectors.person_tracker import PersonTracker
 from core.interface.identify import _drag_for, _drag_reset
-from core.interface.preview import PREVIEW_H, PREVIEW_W, draw_skeleton, fit, setup_window
+from core.interface.preview import (PREVIEW_H, PREVIEW_W, draw_skeleton, fit,
+                                    setup_window, tracker_label)
 from core.interface.win32 import KEY_LEFT, KEY_RIGHT, key_held
 from core.matching import box_iou, match_active
 from core.tracking.seek import seek_to_time_exact
@@ -150,8 +151,9 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
     # interactive mode only: the window is created HERE (not at function
     # entry) so the auto path never leaves a dangling empty "Calibrate"
     # window on screen.
-    win = ("Calibrate f / b  (<->=frame, f=0%, b=100%, m=50%, "
-           "LMB drag: press=b release=f, Enter=confirm, Q=abort)")
+    win = (f"Calibrate f / b [{tracker_label(tracker)}]  "
+           f"(<->=frame, f=0%, b=100%, m=50%, "
+           f"LMB drag: press=b release=f, Enter=confirm, Q=abort)")
     setup_window(win)
 
     # mouse state for the "draw a line = b -> f" interaction.

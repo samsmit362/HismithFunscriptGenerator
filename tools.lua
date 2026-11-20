@@ -37,8 +37,8 @@ function tools_gui()
 	Settings.Min = ofs.Input("Min", Settings.Min, 1)
 	Settings.Max = ofs.Input("Max", Settings.Max, 1)
 	Settings.Move = ofs.Input("MoveVal", Settings.Move, 1)
-	Settings.IgnoreMax = ofs.Checkbox("Ignore Max", Settings.IgnoreMax)
 	Settings.IgnoreMin = ofs.Checkbox("Ignore Min", Settings.IgnoreMin)
+	Settings.IgnoreMax = ofs.Checkbox("Ignore Max", Settings.IgnoreMax)
 	Settings.AlignEdges = ofs.Checkbox("Align to range edges (not 0-100)", Settings.AlignEdges)
 	Settings.AlignRawPath = ofs.Checkbox("Align: weight by raw path length (ofs_result_raw.csv step column)", Settings.AlignRawPath)
 
@@ -51,7 +51,7 @@ function tools_gui()
 		end
     end
     ofs.Tooltip(
-        "Rescale the selected keyframes vertically: each monotone (single-direction) run of selected points is linearly remapped\n" ..
+        "Rescale the selected points vertically: each monotone (single-direction) run of selected points is linearly remapped\n" ..
 		"so its endpoints land on the Min / Max range above (or on the neighboring unselected points' positions when 'Ignore Min' / 'Ignore Max' is off).\n" ..
 		"The run's direction is preserved; runs shorter than 10 units are left untouched. Min / Max are clamped to 0-100 first.")
 
@@ -59,26 +59,26 @@ function tools_gui()
 		move(Settings.Move)
     end
 	ofs.Tooltip(
-        "Shift every selected keyframe vertically by the 'MoveVal' amount (pos = pos + MoveVal).\n" ..
-		"Points that would cross pos 100 are clamped to 100 and extra keyframes are inserted\n" ..
+        "Shift every selected point vertically by the 'MoveVal' amount (pos = pos + MoveVal).\n" ..
+		"Points that would cross pos 100 are clamped to 100 and extra points are inserted\n" ..
 		"at the crossing so the curve stays continuous.")
 
 	if ofs.Button("Align") then
 		align()
     end
 	ofs.Tooltip(
-        "Redistribute the selected keyframes onto a single monotone ramp.\n" ..
+        "Redistribute the selected points onto a single monotone stroke.\n" ..
 		"Each segment's weight (the raw per-frame path length from ofs_result_raw.csv\n" ..
 		"when 'Align: weight by raw path length' is on, otherwise the 0-100 position delta)\n" ..
-		"sets how far the ramp advances.\n" ..
+		"sets how far the stroke advances.\n" ..
 		"Endpoints: 'Align to range edges' uses the first / last selected point's positions;\n" ..
-		"otherwise the ramp runs 0->100 or 100->0 based on the first segment's direction.")
+		"otherwise the stroke runs 0->100 or 100->0 based on the first segment's direction.")
 
 	if ofs.Button("Stretch Selection To Current Video Time") then
 		stretch_to_current_time()
 	   end
 	ofs.Tooltip(
-        "Stretch the selected keyframes along the time axis so the range spans from the current video time (playhead)\n" ..
+        "Stretch the selected points along the time axis so the range spans from the current video time (playhead)\n" ..
 		"to the opposite edge of the selection: the edge closest to the playhead stays pinned, the other edge moves to the playhead.\n" ..
 		"Every point keeps its relative position in the span, and its pos is taken from\n" ..
 		"the original curve at the matching original time (snapped to the nearest video frame).")
@@ -87,10 +87,9 @@ function tools_gui()
 		insert_with_stretch()
 	   end
 	ofs.Tooltip(
-        "Insert the copied keyframes (clipboard) into the interval between the keyframe at (or just before) the current video time\n" ..
-		"and the next keyframe: the copied fragment is linearly stretched in time to span that interval,\n" ..
-		"its positions are scaled to match the two endpoints' positions (or shifted relative to the interpolated baseline for closed cycles),\n" ..
-		"and any original points in between are replaced.")
+        "Insert the copied points (clipboard) into the interval between the point at (or just before) the current video time\n" ..
+		"and the next point: the copied fragment is linearly stretched in time to span that interval,\n" ..
+		"its positions are scaled to match the two endpoints' positions (or shifted relative to the interpolated baseline for closed cycles).")
 end
 
 function move(shift_val)
@@ -316,20 +315,20 @@ local function load_raw_steps()
 	return times, steps
 end
 
--- Align: redistribute the selected range onto a monotone ramp, preserving
+-- Align: redistribute the selected range onto a monotone stroke, preserving
 -- the relative "weights" of each segment.  The per-segment weight is, by
 -- default (Settings.AlignRawPath), the RAW per-frame path length in px taken
 -- from ofs_result_raw.csv (the `step` column - the same quantity the
 -- "complex" motion mode integrates: pos = 100 * cumsum(step) / total).  This
--- makes the ramp follow the true physical trajectory rather than the
+-- makes the stroke follow the true physical trajectory rather than the
 -- (already rescaled) 0-100 positions.  When the CSV is unavailable, or the
 -- checkbox is off, the weight falls back to |dP| in the 0-100 space.
 --
 -- Two endpoint modes (toggle via Settings.AlignEdges):
---   * classic (default): ramp endpoints are A=100 / B=0 or A=0 / B=100,
+--   * classic (default): stroke endpoints are A=100 / B=0 or A=0 / B=100,
 --     chosen from the FIRST INTERNAL segment of the selected range
 --     (orig[2] - orig[1]).  Pre-range points are NOT consulted.
---   * edges: ramp endpoints are the left and right edge of the range
+--   * edges: stroke endpoints are the left and right edge of the range
 --     (A = orig[1], B = orig[#orig]); direction follows automatically.
 --
 -- Formula applied in both modes:
@@ -810,15 +809,15 @@ local function get_target_valid_extrema(points)
 end
 
 
--- Insert the copied buffer into the interval between the target keyframe at
+-- Insert the copied buffer into the interval between the target point at
 -- (or immediately preceding) the current video time (P1) and the immediately
--- following keyframe on the timeline (P2).
+-- following point on the timeline (P2).
 --
 -- The entire copied buffer is linearly stretched in time to span [P1.at, P2.at],
--- pinning its first and last keyframes to P1 and P2. Positions are scaled to
+-- pinning its first and last points to P1 and P2. Positions are scaled to
 -- match [P1.pos, P2.pos] when the copied buffer has a net vertical span, or
 -- shifted relative to the interpolated baseline between P1.pos and P2.pos for
--- closed cycles. Intermediate keyframe times are snapped to the nearest video
+-- closed cycles. Intermediate point times are snapped to the nearest video
 -- frame, and positions are clamped and rounded to integers (0-100).
 function insert_with_stretch()
 	print("insert_with_stretch: Starting ...")
@@ -893,9 +892,9 @@ function insert_with_stretch()
 	local c_span_pos = c_end_pos - c_start_pos
 	local p_span_pos = p2.pos - p1.pos
 
-	-- 4) Build the new keyframes with linear stretching in time and scaling in pos
+	-- 4) Build the new points with linear stretching in time and scaling in pos
 	local fps = player.FPS()
-	local new_keyframes = {}
+	local new_points = {}
 
 	for i = 1, n_copied do
 		local ratio_t = (copied_points[i].at - c_start_at) / c_span_t
@@ -919,18 +918,18 @@ function insert_with_stretch()
 		end
 
 		new_pos = math.max(0, math.min(100, math.floor(new_pos + 0.5)))
-		new_keyframes[#new_keyframes + 1] = { at = new_at, pos = new_pos }
+		new_points[#new_points + 1] = { at = new_at, pos = new_pos }
 	end
 
 	-- Guarantee an exact match of the boundary points with P1 and P2
-	new_keyframes[1].at = p1.at
-	new_keyframes[1].pos = p1.pos
-	new_keyframes[n_copied].at = p2.at
-	new_keyframes[n_copied].pos = p2.pos
+	new_points[1].at = p1.at
+	new_points[1].pos = p1.pos
+	new_points[n_copied].at = p2.at
+	new_points[n_copied].pos = p2.pos
 
 	-- 5) Deduplicate by time (if two points landed on the same frame during compression)
 	local dedup = {}
-	for _, kf in ipairs(new_keyframes) do
+	for _, kf in ipairs(new_points) do
 		if #dedup == 0 or math.abs(kf.at - dedup[#dedup].at) > 0.0005 then
 			dedup[#dedup + 1] = kf
 		else
@@ -951,5 +950,5 @@ function insert_with_stretch()
 	end
 
 	script:commit()
-	print("insert_with_stretch: done, " .. tostring(#dedup) .. " keyframes inserted")
+	print("insert_with_stretch: done, " .. tostring(#dedup) .. " points inserted")
 end

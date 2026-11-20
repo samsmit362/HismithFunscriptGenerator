@@ -38,7 +38,8 @@ import numpy as np
 from core.config import Config, TARGETS
 from core.detectors.person_tracker import PersonTracker
 from core.interface.preview import (PREVIEW_H, PREVIEW_W, center_window,
-                                    draw_skeleton, fit, setup_window)
+                                    draw_skeleton, fit, setup_window,
+                                    tracker_label)
 from core.interface.win32 import key_held
 from core.logging import log
 from core.matching import box_iou, match_active
@@ -198,7 +199,8 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
     log(f"[stream] Streaming from {format_time(start_s)} to end of video ({format_time(total_dur)})")
     print("[stream] q / space = stop & save")
 
-    win = "Hismith Funscript Preview (active partner point p)"
+    win = (f"Hismith Funscript [{tracker_label(tracker)}] "
+           f"(active partner point p)")
     # Same window setup as the identify / calibrate windows (setup_window):
     # 960x540, aspect-ratio locked, centered - so every window in the SOT flow
     # is exactly the same size and the ROI drawn there lines up 1:1 with the
