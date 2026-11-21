@@ -253,17 +253,13 @@ class PyAVVideoReader(BaseVideoReader):
                 if cur is None:
                     return None
             return cur
-        # n < 0: re-seek to the start and walk forward to (current + n).
-        self._seek_to_ms(0.0)
-        target_idx = max(0, self._index() + n)
-        idx = -1
-        while True:
-            cur = self.read()
-            if cur is None:
-                return None
-            idx += 1
-            if idx == target_idx:
-                return cur
+        # n < 0: time-based backward seek (same mechanism as seek_to_time_exact).
+        # Compute the target time as current - |n| frames worth of time using
+        # the stream's average rate (VFR-safe: the actual landing point is
+        # determined by keyframe seek + forward decode, never by frame index).
+        avg_fps = float(self._stream.average_rate) if self._stream.average_rate else 30.0
+        target_ms = max(0.0, self.current_time_ms - (abs(n) / avg_fps) * 1000.0)
+        return self.seek_ms(target_ms)
 
     def reset(self) -> Optional[Tuple[np.ndarray, float]]:
         self._seek_to_ms(0.0)
@@ -283,15 +279,6 @@ class PyAVVideoReader(BaseVideoReader):
         if self._last is None:
             return 0.0
         return self._time_ms(self._last[0])
-
-    def _index(self) -> int:
-        """Best-effort decoded-frame index (for step(); not a frame time)."""
-        if self._last is None:
-            return -1
-        tb = self._stream.time_base
-        if tb is None:
-            return 0
-        return max(0, int(round((self._last[0] - self._start_pts) * float(tb))))
 
     @property
     def width(self) -> int:

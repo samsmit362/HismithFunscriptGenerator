@@ -11,9 +11,10 @@ import cv2
 import numpy as np
 
 from core.detectors.person_tracker import PersonTracker
+from core.utilities import format_time
 from core.interface.identify import _drag_for, _drag_reset
 from core.interface.preview import (PREVIEW_H, PREVIEW_W, draw_skeleton, fit,
-                                    setup_window, tracker_label)
+                                    put_text_centered, setup_window, tracker_label)
 from core.interface.win32 import KEY_LEFT, KEY_RIGHT, key_held
 from core.matching import box_iou, match_active
 from core.tracking.seek import seek_to_time_exact
@@ -331,12 +332,22 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
         elif calib_hold["running"] > 0:
             status = f"[hold={calib_hold['running']}]  {status}"
         info = (f"< / > step  f=0%  b=100%  m=50%  "
-                f"LMB drag: press=b, release=f  "
+                f"LMB drag: press=b, release=f\n"
                 f"Enter=confirm  Q=abort  "
                 f"[hold S]=active+passive skeletons  {status}")
-        (tw, _), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-        cv2.putText(view, info, ((PREVIEW_W - tw) // 2, PREVIEW_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        put_text_centered(view, info, PREVIEW_H - 30, color=(255, 255, 255))
+        # time display (bottom-right, same as streaming preview)
+        cur_t_sec = reader.current_time_ms / 1000.0
+        total_dur = reader.duration_s if reader.duration_s is not None else 0.0
+        time_txt = f"{format_time(cur_t_sec)} / {format_time(total_dur)}"
+        ts = 0.8
+        (tw2, _), _ = cv2.getTextSize(time_txt, cv2.FONT_HERSHEY_SIMPLEX, ts, 2)
+        while tw2 > PREVIEW_W - 20 and ts > 0.3:
+            ts -= 0.05
+            (tw2, _), _ = cv2.getTextSize(time_txt, cv2.FONT_HERSHEY_SIMPLEX, ts, 2)
+        time_x = max(5, PREVIEW_W - tw2 - 10)
+        cv2.putText(view, time_txt, (time_x, PREVIEW_H - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, ts, (255, 255, 255), 2)
         if key_held(ord('s')) or key_held(ord('S')):
             persons = list(_cache) if _cache else detect_persons(frame)
             if persons:
@@ -388,7 +399,10 @@ def calibrate_thrust(video_path: str, start_s: float, fps: float,
         elif k in (KEY_LEFT, KEY_RIGHT):
             mods = (cv2.waitKeyEx(1) >> 16) & 0xFF
             step = 10 if mods in (0x1, 0x2, 0x4) else 1
-            delta = step if k == KEY_RIGHT else -15
+            # RIGHT: decode N frames forward; LEFT: always 2 frames back via
+            # time-based seek (same mechanism as seek_to_time_exact — no frame
+            # index, no fps averaging: target_ms = current_time_ms - 2/fps*1000)
+            delta = step if k == KEY_RIGHT else -2
             nxt = reader.step(delta)
             if nxt is None:
                 break

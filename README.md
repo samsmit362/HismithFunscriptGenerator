@@ -1,53 +1,61 @@
 # Hismith Funscript Generator
 
-An OpenFunscripter (OFS) extension that
-generates FunScript keyframes from a video using AI pose tracking. The generated script
-drives a Hismith sex machine:
+An OpenFunscripter (OFS) extension that generates FunScript keyframes from a video using AI pose tracking. The generated script drives a Hismith sex machine:
 
-- `pos = 0`   → maximum forward extension (fully inserted)
-- `pos = 100` → maximum backward extension (fully retracted)
+* `pos = 0`   → maximum forward extension (fully inserted)
+* `pos = 100` → maximum backward extension (fully retracted)
 
-The extension tracks the moving **point p** of the *active* partner (selected
-zone) frame-by-frame, segments the motion into forward/back strokes, and maps each frame
-to a 0..100 position. The result is imported into the current OFS timeline, where the
-points can be further edited by hand.
+The extension tracks the moving **point p** of the *active* partner (selected zone) frame-by-frame, segments the motion into forward/back strokes, and maps each frame to a 0..100 position. The result is imported into the current OFS timeline, where the points can be further edited by hand.
 
 ## How it works
 
-1. **Identify partners** — a window on the first frame lets you pick the active and
-   passive partner (pose / mediapipe trackers), or draw an ROI (SOT / OSTrack), or pick
-   a text-prompt detection (GroundingDINO).
-2. **Thrust calibration** — mark `b` (full retraction, `pos = 100`) and `f` (full insertion,
-   `pos = 0`) on a frame of the active partner; these two points define the thrust axis.
-3. **Streaming collect** — every frame is previewed (960x540, OpenCV) and the raw
-   per-frame track of point p is collected (with optional optical-flow refinement and
-   identity hold-over).
-4. **Post-pass** — the track is segmented into strokes, an adaptive axis is fit to each
-   stroke, and a position per frame is computed (motion mode + normalization).
-5. **RDP smoothing** — an interactive window lets you tune the epsilon of the
-   Ramer–Douglas–Peucker simplification.
-6. **FunScript output** — one keyframe per `(time, pos)` pair is written to
-   `ofs_result.json` and imported into the OFS timeline.
+1. **Scene setup** — configure scene rotation, offset, `1x`–`3x` zoom, and final crop region.
+2. **ROI / active partner selection** *(skipped for `groundingdino` and `ollama`, which locate targets automatically via prompts)*:
+   - **`sot-*` / `ostrack` / `gsam2`:** draw the active partner ROI and, optionally, a secondary ROI on a passive partner or static background area to reduce camera movement effects. You can also adjust the internal resolution of the selected scene via a second `1x`–`3x` zoom to improve tracking accuracy.
+   - **`yolo` / `mediapipe`:** switch between auto-detected people using the number keys (`1`, `2`, ...)—optionally pressing `S` to preview the selected character's skeleton—then press `A` to assign the active partner and, optionally, `P` to assign the passive partner.
+3. **Thrust calibration** — define the initial thrust direction (`b` = full retraction, `pos = 100`; `f` = full insertion, `pos = 0`) using either method:
+   - **Manual line drag:** draw a line segment directly with the mouse (`LMB press` = `b`, `LMB release` = `f`). Exact point positions do not matter—only the vector direction (angle).
+   - **Frame-by-frame keypoint picking:** scrub through frames using the `<` (Left Arrow) and `>` (Right Arrow) keys and mark the auto-detected tracking points at full retraction (`b`) and full insertion (`f`).
+4. **Streaming collect** — frames are processed and previewed (`960x540`, OpenCV) to collect the raw per-frame trajectory of point `p`, applying optional scene/camera drift compensation (`scene_warp`), optical-flow refinement (`flow_refiner`), and identity hold-over (`holdover`).
+5. **Post-pass** — the trajectory is segmented into strokes with adaptive axis tracking (handling changing thrust angles and auto-detecting `b`/`f` endpoints), and each frame's `pos` is computed along the curved path (`positions` + motion mode & normalization).
+6. **RDP smoothing** — an interactive preview window lets you tune the epsilon of the Ramer–Douglas–Peucker simplification (`rdp_ui`).
+7. **FunScript output** — keyframes (`time`, `pos`) are written to `ofs_result.json` and automatically imported into the active OFS timeline.
 
 ## Tracker backends
 
-| Tracker          | Kind | Description                                                                  |
-|------------------|------|------------------------------------------------------------------------------|
-| `sot-csrt`       | sot    | OpenCV `TrackerCSRT` on a drawn ROI (max accuracy)                         |
-| `sot-kcf`        | sot    | OpenCV `TrackerKCF` on a drawn ROI                                         |
-| `sot-vit`        | sot    | OpenCV `TrackerVit` (ONNX) on a drawn ROI                                  |
-| `sot-mil`        | sot    | OpenCV `TrackerMIL` (online multiple-instance learning)                    |
-| `ostrack`        | sot    | OSTrack — one-stream ViT SOT on ONNX                                       |
-| `yolo`           | pose   | YOLOv8 / v11 / v26 pose (COCO-17 keypoints)                                |
-| `mediapipe`      | pose   | MediaPipe pose (33 landmarks)                                              |
-| `groundingdino`  | dino   | GroundingDINO — open-vocabulary text-prompt detection                      |
-| `gsam2`          | mask   | Grounded SAM 2, pixel-mask silhouette                                      |
-| `ollama`         | LLM    | LLM: draw a ROI, the model reads all sampled frames (slow, for hard clips) |
+| Tracker | Kind | Description |
+|----|----|----|
+| `sot-csrt` | sot | OpenCV `TrackerCSRT` on a drawn ROI (max accuracy) |
+| `sot-kcf` | sot | OpenCV `TrackerKCF` on a drawn ROI |
+| `sot-vit` | sot | OpenCV `TrackerVit` (ONNX) on a drawn ROI |
+| `sot-mil` | sot | OpenCV `TrackerMIL` (online multiple-instance learning) |
+| `ostrack` | sot | OSTrack — one-stream ViT SOT on ONNX |
+| `yolo` | pose | YOLOv8 / v11 / v26 pose (COCO-17 keypoints) |
+| `mediapipe` | pose | MediaPipe pose (33 landmarks) |
+| `groundingdino` | dino | GroundingDINO — open-vocabulary text-prompt detection |
+| `gsam2` | mask | Grounded SAM 2, pixel-mask silhouette |
+| `ollama` | LLM | LLM: draw a ROI, the model reads all sampled frames (slow, for hard clips) |
+
+This project includes several experimental tracking methods, with **`sot-csrt`** currently proving to be the most effective and stable option for FunScript generation tasks.
+
+While the workflow with `sot-csrt` is conceptually similar to [MTFG (Python-Funscript-Editor)](https://github.com/michael-mueller-git/Python-Funscript-Editor), it offers significantly higher stability and precision:
+
+* **Superior grip on skin textures:** Unlike fast correlation trackers (such as KCF/MOSSE commonly used in MTFG) that rely on rigid rectangular bounding boxes and easily drift on low-contrast surfaces, CSRT (Discriminative Correlation Filter with Channel and Spatial Reliability) uses spatial reliability maps and multi-channel features (HOG + ColorNames). This allows it to weight foreground pixels higher than the background, preventing drift on smooth skin, partial occlusions, or non-rigid body deformations.
+* **Outperforms neural/pose models on micro-movements:** Unlike skeleton-based pose estimators (YOLO, MediaPipe) or heavy segmentation models—which suffer from keypoint jitter and cannot lock onto arbitrary skin patches—`sot-csrt` tracks exact surface textures frame-by-frame with sub-pixel consistency and zero keypoint snapping.
+
+### Key Capabilities
+
+* **Dynamic direction tracking:** Automatically adapts to changes in the thrust angle. You only need to specify an approximate initial direction—the program will continue to accurately detect the `b` and `f` endpoints even as the angle of motion shifts throughout the scene.
+* **Camera motion compensation:** In addition to tracking the active partner's ROI, you can select a secondary ROI on a static background area or the passive partner. This helps reduce the impact of camera movement, yielding significantly more accurate and realistic stroke results.
+* **True path-length calculation:** Computes `pos` as the exact percentage of total real displacement along complex, curved trajectories between the `b` and `f` endpoints rather than simple linear projection.
+* **Fast scene & resolution controls:** Quickly configure offset, rotation, scene crop region, and internal processing resolution.
+* **Dual-stage zoom selection:** Features two independent zoom controls (`1x`–`3x`)—one in the **Scene ROI** selection window and another in the **Tracking ROI** selection window—allowing you to rapidly isolate the region of interest and upscale its internal resolution for maximum `sot-csrt` tracking accuracy.
 
 ## Requirements
 
-- **Python** (in PATH, or set the "Python cmd" field in the GUI).
-- Install the dependencies:
+* **Python** (in PATH, or set the "Python cmd" field in the GUI).
+
+* Install the dependencies:
 
   ```
   # Install Python (checked on 3.14.6):
@@ -70,7 +78,8 @@ points can be further edited by hand.
   See [`requirements.txt`](requirements.txt) — the single source of truth for the
   environment (OpenCV-contrib, NumPy, SciPy, and the tracker backends: ultralytics,
   mediapipe, `rf-groundingdino` + torch/torchvision, onnxruntime, etc.).
-- The model weights (YOLO / MediaPipe / GroundingDINO / SAM2 / OSTrack ONNX) are
+
+* The model weights (YOLO / MediaPipe / GroundingDINO / SAM2 / OSTrack ONNX) are
   **auto-downloaded** into `models/` on first run.
 
 ## Extension folder layout

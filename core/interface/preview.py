@@ -6,8 +6,30 @@ import cv2
 import numpy as np
 
 from core.types import Person
+from core.logging import log
 
 PREVIEW_W, PREVIEW_H = 960, 540  # 480x270 * 2, 16:9
+
+
+def put_text_centered(img, text, y, font_scale=0.7, color=(255, 255, 255),
+                      thickness=2, min_scale=0.3, max_width=None):
+    """Draw text centered horizontally on img.
+    If the text is wider than max_width (default PREVIEW_W - 20), the font
+    scale is reduced step-by-step until it fits or min_scale is reached.
+    The x position is clamped to [5, img_width - tw - 5] so it never goes
+    off the left or right edge."""
+    if max_width is None:
+        max_width = img.shape[1] - 10
+    fs = font_scale
+    (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, thickness)
+    tw_start = tw
+    while tw > max_width and fs > min_scale:
+        fs -= 0.05
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, fs, thickness)
+    # log(f"[put_text_centered] PREVIEW_W: {PREVIEW_W} img_w: {img.shape[1]} "
+    #     f"tw_start: {tw_start} tw_end: {tw} fs_start: {font_scale} fs_end: {fs}")
+    x = max(5, (img.shape[1] - tw) // 2)
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, fs, color, thickness)
 
 
 def fit(frame: np.ndarray):

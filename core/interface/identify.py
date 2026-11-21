@@ -24,7 +24,7 @@ import cv2
 from core.detectors.box import box_center
 from core.detectors.person_tracker import PersonTracker
 from core.interface.preview import (PREVIEW_H, PREVIEW_W, draw_skeleton, fit,
-                                    setup_window, tracker_label)
+                                    put_text_centered, setup_window, tracker_label)
 from core.interface.win32 import KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, key_held
 from core.tracking.scene_warp import (ANGLE_STEP_DEG, PAN_CLAMP_PX, PAN_STEP_PX,
                                       SceneTransform, ZOOM_LEVELS, _reanchor_pan)
@@ -245,16 +245,12 @@ def _setup_scene(frame: np.ndarray,
                 f"pan=({int(sc.pan_dx)},{int(sc.pan_dy)})"
                 + (f"  ROI={roi_out[2]}x{roi_out[3]}@({roi_out[0]},{roi_out[1]})"
                    if roi_out else "  ROI=full"))
-        (sw_, _sh_2), _ = cv2.getTextSize(stat, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
-        cv2.putText(view, stat, ((PREVIEW_W - sw_) // 2, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 2)
+        put_text_centered(view, stat, 40, color=(0, 255, 0))
 
         # bottom hint bar
         hint = ("+/- zoom   [ ] rotate 15deg   arrows pan 10px   "
                 "LMB drag = scene ROI   R reset   Enter OK   Q abort")
-        (tw, th_), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 2)
-        cv2.putText(view, hint, ((PREVIEW_W - tw) // 2, PREVIEW_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 2)
+        put_text_centered(view, hint, PREVIEW_H - 10, color=(255, 255, 255))
 
         cv2.imshow(win, view)
         k = cv2.waitKeyEx(30)
@@ -457,19 +453,12 @@ def _identify_sot(video_path: str, start_s: float, fps: float,
         if init_err is not None:
             err = (f"tracker init failed: {init_err}  - LMB=new p ROI, "
                    f"Ctrl+LMB=new ps ROI, R=clear")
-            (ew, _eh), _ = cv2.getTextSize(err, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-            if ew > PREVIEW_W - 20:
-                err = err[:max(1, (PREVIEW_W - 20) * len(err) // ew)]
-                (ew, _eh), _ = cv2.getTextSize(err, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-            cv2.putText(view, err, ((PREVIEW_W - ew) // 2, PREVIEW_H - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 64, 255), 2)
+            put_text_centered(view, err, PREVIEW_H - 10, color=(0, 64, 255))
         info = (f"LMB=draw p ROI   Ctrl+LMB=draw ps ROI (release=fixed)   "
+                f"R=clear all   Enter=confirm   Q=abort\n"
                 f"+/- resolution zoom x1..x3 "
-                f"(now x{res_zoom:g} size={disp.shape[1]}x{disp.shape[0]}) "
-                f"R=clear all   Enter=confirm   Q=abort")
-        (tw, th), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
-        cv2.putText(view, info, ((PREVIEW_W - tw) // 2, PREVIEW_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+                f"(now x{res_zoom:g} size={disp.shape[1]}x{disp.shape[0]})")
+        put_text_centered(view, info, PREVIEW_H - 30, color=(255, 255, 255))
         cv2.imshow(win, view)
 
         k = cv2.waitKeyEx(30) & 0xFF
@@ -728,15 +717,11 @@ def _identify_dino(video_path: str, start_s: float, fps: float,
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
         if hint is not None:
-            (hw, _hh), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-            cv2.putText(view, hint, ((PREVIEW_W - hw) // 2, PREVIEW_H - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 64, 255), 2)
+            put_text_centered(view, hint, PREVIEW_H - 10, color=(0, 64, 255))
 
         info = ("LMB inside active box: press + hold = move p, release = fix    "
                 "R = next frame    Enter = confirm    Q = abort")
-        (tw, th), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 2)
-        cv2.putText(view, info, ((PREVIEW_W - tw) // 2, PREVIEW_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 2)
+        put_text_centered(view, info, PREVIEW_H - 10, color=(255, 255, 255))
         cv2.imshow(win, view)
 
         k = cv2.waitKeyEx(30) & 0xFF
@@ -885,9 +870,7 @@ def _identify_persons(video_path: str, start_s: float, fps: float,
                 f"[hold S]=skeleton of selected  "
                 f"  active={'yes' if active else '-'} "
                 f"passive={'yes' if passive else '-'}")
-        (tw, th), _ = cv2.getTextSize(info, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
-        cv2.putText(view, info, ((PREVIEW_W - tw) // 2, PREVIEW_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+        put_text_centered(view, info, PREVIEW_H - 10, color=(255, 255, 255))
         if key_held(ord('s')) or key_held(ord('S')):
             draw_skeleton(view, scale, x0, y0, persons[sel_idx])
         cv2.imshow(win, view)

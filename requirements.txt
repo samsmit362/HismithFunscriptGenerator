@@ -34,6 +34,14 @@
 opencv-contrib-python>=4.8.0
 numpy>=1.24
 scipy>=1.10
+# Precise video decoding + REAL frame presentation time (frame.pts).
+# core/video_reader.py (BaseVideoReader / PyAVVideoReader) drives every
+# interactive window + the streaming collect through PyAV instead of
+# cv2.VideoCapture, so frame times come from frame.pts (normalised against
+# the stream start) and are NEVER derived from fps (variable-frame-rate
+# safe).  Recent PyAV releases ship ready-made binary wheels for
+# Python 3.13 / 3.14.
+av>=12.0.0
 # RDP core (Cython, simplification.cutil.simplify_coords_idx) - used by
 # core/interface/rdp_ui.py interactive_rdp.  Cython build ships with the
 # sdist; pure-Python fallback only exists in newer releases, so do NOT

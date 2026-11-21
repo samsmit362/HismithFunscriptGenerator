@@ -64,8 +64,8 @@ DINO_TARGETS = {
     "guy left-hip": "the left outer hip curve of a guy body .",
     "guy right-hip": "the right outer hip curve of a guy body .",
     "guy thigh": "the visible upper thigh silhouette of a guy body .",
-    "guy torso": "the side torso profile line of a of a guy body .",
-    "guy shoulders": "the shoulder line of a of a guy body .",
+    "guy torso": "the side torso profile line of a guy body .",
+    "guy shoulders": "the shoulder line of a guy body .",
     "guy head": "the outline of a guy head and hair .",
     "guy ankle": "the visible ankle and lower shin of a guy .",
 }

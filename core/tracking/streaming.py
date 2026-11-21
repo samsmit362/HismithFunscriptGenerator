@@ -596,15 +596,26 @@ def tracking_stream(video_path: str, start_s: float, fps: float,
             hint = dyn_hint + hint
         if add_hints:
             hint = f"{hint}\n{" | ".join(add_hints)}"
-        (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        cv2.putText(canvas, hint, ((PREVIEW_W - tw) // 2, th + 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        # hint: shrink font if text overflows the window width
+        hs = 0.8
+        (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, hs, 2)
+        while tw > PREVIEW_W - 20 and hs > 0.3:
+            hs -= 0.05
+            (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, hs, 2)
+        hint_x = max(5, (PREVIEW_W - tw) // 2)
+        cv2.putText(canvas, hint, (hint_x, th + 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, hs, (255, 255, 255), 2)
 
         cur_time = cur_t     # REAL time (frame.pts), not frame_idx/fps
         time_txt = f"{format_time(cur_time)} / {format_time(total_dur)}"
-        (tw2, _), _ = cv2.getTextSize(time_txt, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-        cv2.putText(canvas, time_txt, (PREVIEW_W - tw2 - 10, PREVIEW_H - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        ts = 0.8
+        (tw2, _), _ = cv2.getTextSize(time_txt, cv2.FONT_HERSHEY_SIMPLEX, ts, 2)
+        while tw2 > PREVIEW_W - 20 and ts > 0.3:
+            ts -= 0.05
+            (tw2, _), _ = cv2.getTextSize(time_txt, cv2.FONT_HERSHEY_SIMPLEX, ts, 2)
+        time_x = max(5, PREVIEW_W - tw2 - 10)
+        cv2.putText(canvas, time_txt, (time_x, PREVIEW_H - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, ts, (255, 255, 255), 2)
 
         if key_held(ord('s')) or key_held(ord('S')):
             if persons:

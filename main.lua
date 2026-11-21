@@ -489,7 +489,7 @@ function startGeneration()
     --                    must LEAVE from), nil if no action at/before start_s
     --   anchorEndPos   = pos of that end action (the value the new segment
     --                    must LAND on), nil if no action after start_s
-    -- A keyframe AT start_s is the LEFT anchor (the START of the new segment),
+    -- A point AT start_s is the LEFT anchor (the START of the new segment),
     -- NOT the right/stop boundary.  The two anchor TIMES are also what
     -- importResult() deletes from the timeline before adding the new points.
     local startS = math.floor(startTime * 1000.0 + 0.5) / 1000.0  -- 3-decimal, matches --start
@@ -841,7 +841,7 @@ function importResult()
     local script = ofs.Script(genCtx.scriptIdx)
 
     -- Step 0: delete the original boundary anchor point(s) so the new
-    -- segment's keyframe(s) REPLACE them instead of colliding.  Without this,
+    -- segment's point(s) REPLACE them instead of colliding.  Without this,
     -- the cross-dedupe below (Step 2/3) would drop the new point that lands on
     -- the same ms as the still-existing anchor, leaving the user's OLD value.
     local deletedAnchors = 0
